@@ -1,0 +1,5 @@
+project = "minimal"
+sources = ["minimal.kicad_pcb"]
+
+[blocks.mcu]
+sheet = "sheets/mcu.kicad_sch"

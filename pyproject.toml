@@ -21,6 +21,7 @@ classifiers = [
 ]
 dependencies = [
     "click>=8.1.7",
+    "kiutils>=1.4.8",
 ]
 
 [project.scripts]
