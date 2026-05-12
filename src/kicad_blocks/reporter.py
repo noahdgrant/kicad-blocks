@@ -98,4 +98,11 @@ def format_apply_plan(plan: ApplyPlan, *, dry_run: bool) -> str:
         lines.append("  warning: source footprints with no target counterpart:")
         for sym in plan.unmatched_source:
             lines.append(f"    - {sym}")
+    if plan.unresolved_nets:
+        lines.append(
+            "  warning: source net(s) with no resolvable target "
+            "(declare overrides under [blocks.<name>.net_map]):"
+        )
+        for net in plan.unresolved_nets:
+            lines.append(f"    - {net}")
     return "\n".join(lines)

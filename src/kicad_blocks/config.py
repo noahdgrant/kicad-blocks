@@ -38,6 +38,10 @@ class InvalidConfigError(Exception):
         self.errors = errors
 
 
+def _empty_str_map() -> dict[str, str]:
+    return {}
+
+
 @dataclass(frozen=True)
 class BlockSpec:
     """Declaration of a single reusable block.
@@ -52,12 +56,17 @@ class BlockSpec:
         anchor: Optional refdes of the anchor footprint in this project's
             target PCB. The anchor's position and rotation define the frame
             into which the block is placed. Required by ``reuse``.
+        net_map: Explicit source-net → target-net overrides from
+            ``[blocks.<name>.net_map]``. Empty by default; ``net_map.build``
+            auto-matches identical names, and overrides cover names that
+            diverge between projects.
     """
 
     name: str
     sheet: Path
     source: Path | None = None
     anchor: str | None = None
+    net_map: dict[str, str] = field(default_factory=_empty_str_map)
 
 
 def _empty_blocks() -> dict[str, BlockSpec]:
@@ -241,7 +250,48 @@ def _validate(path: Path, raw: str, data: dict[str, Any]) -> Config:
                     continue
                 anchor = anchor_raw
 
-            blocks[name] = BlockSpec(name=name, sheet=Path(sheet), source=source, anchor=anchor)
+            net_map_raw: object = block_dict.get("net_map")
+            net_map: dict[str, str] = {}
+            if net_map_raw is not None:
+                if not isinstance(net_map_raw, dict):
+                    errors.append(
+                        ConfigError(
+                            path=path,
+                            message=(
+                                f"'{key_path}.net_map' must be a table of "
+                                f"source-name = target-name string pairs"
+                            ),
+                            line=_find_section_line(raw, f"{key_path}.net_map")
+                            or _find_section_line(raw, key_path),
+                            key_path=f"{key_path}.net_map",
+                        )
+                    )
+                    continue
+                net_map_dict = cast(dict[str, object], net_map_raw)
+                bad_pairs = [k for k, v in net_map_dict.items() if not isinstance(v, str)]
+                if bad_pairs:
+                    errors.append(
+                        ConfigError(
+                            path=path,
+                            message=(
+                                f"'{key_path}.net_map' entries must be strings "
+                                f"(bad keys: {bad_pairs})"
+                            ),
+                            line=_find_section_line(raw, f"{key_path}.net_map")
+                            or _find_section_line(raw, key_path),
+                            key_path=f"{key_path}.net_map",
+                        )
+                    )
+                    continue
+                net_map = {k: v for k, v in net_map_dict.items() if isinstance(v, str)}
+
+            blocks[name] = BlockSpec(
+                name=name,
+                sheet=Path(sheet),
+                source=source,
+                anchor=anchor,
+                net_map=net_map,
+            )
 
     if errors:
         raise InvalidConfigError(errors)
