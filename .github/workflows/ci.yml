@@ -23,10 +23,13 @@ jobs:
         run: uv sync --frozen
 
       - name: Lint (ruff check)
-        run: uv run ruff check
+        run: uv run ruff check .
+
+      - name: Import order (ruff check --select I)
+        run: uv run ruff check --select I .
 
       - name: Format check (ruff format)
-        run: uv run ruff format --check
+        run: uv run ruff format --check .
 
       - name: Type check (pyright)
         run: uv run pyright
