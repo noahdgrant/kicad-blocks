@@ -70,9 +70,7 @@ def test_read_lock_missing_file_raises_lockfileerror(tmp_path: Path) -> None:
 def test_read_lock_rejects_future_schema_version(tmp_path: Path) -> None:
     """A lock file from a newer schema is refused with a clear message."""
     path = tmp_path / "future.lock.json"
-    path.write_text(
-        json.dumps({"schema_version": 999, "plugin_version": "0.0.1", "blocks": {}})
-    )
+    path.write_text(json.dumps({"schema_version": 999, "plugin_version": "0.0.1", "blocks": {}}))
     with pytest.raises(LockFileError, match="schema version"):
         read_lock(path)
 

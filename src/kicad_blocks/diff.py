@@ -163,18 +163,14 @@ def compute_diff(
         if fp.symbol_uuid is None:
             continue
         if fp.symbol_uuid not in target_by_symbol:
-            added.append(
-                AddedFootprint(symbol_uuid=fp.symbol_uuid, source_reference=fp.reference)
-            )
+            added.append(AddedFootprint(symbol_uuid=fp.symbol_uuid, source_reference=fp.reference))
 
     target_block = footprints_in_sheet(target_pcb, sheet)
     removed: list[RemovedFootprint] = []
     for fp in target_block:
         if fp.symbol_uuid is None or fp.symbol_uuid in source_symbol_uuids:
             continue
-        removed.append(
-            RemovedFootprint(symbol_uuid=fp.symbol_uuid, target_reference=fp.reference)
-        )
+        removed.append(RemovedFootprint(symbol_uuid=fp.symbol_uuid, target_reference=fp.reference))
 
     planned_tracks = tuple(
         TrackChange(
@@ -283,5 +279,3 @@ def _is_near_any(point: tuple[float, float], candidates: list[tuple[float, float
         if abs(px - cx) <= _PAD_TOLERANCE_MM and abs(py - cy) <= _PAD_TOLERANCE_MM:
             return True
     return False
-
-
