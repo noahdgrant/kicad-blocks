@@ -595,9 +595,7 @@ def _collect_graphic_points(item: object) -> tuple[tuple[float, float], ...]:
     for attr in _GRAPHIC_POINT_ATTRS:
         p = getattr(item, attr, None)
         if p is not None and hasattr(p, "X") and hasattr(p, "Y"):
-            points.append(
-                (float(getattr(p, "X", 0.0) or 0.0), float(getattr(p, "Y", 0.0) or 0.0))
-            )
+            points.append((float(getattr(p, "X", 0.0) or 0.0), float(getattr(p, "Y", 0.0) or 0.0)))
     for attr in _GRAPHIC_LIST_ATTRS:
         coords = getattr(item, attr, None)
         if not coords:

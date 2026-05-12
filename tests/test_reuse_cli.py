@@ -208,9 +208,7 @@ def test_reuse_refuses_on_layer_stackup_mismatch(tmp_path: Path) -> None:
     """A target with a different stackup is refused with a clear diff."""
     config_path, target_path = _stage_target_project(tmp_path)
     # Drop a user layer from the target to force a mismatch.
-    target_path.write_text(
-        target_path.read_text().replace('    (43 "Eco2.User" user)\n', "")
-    )
+    target_path.write_text(target_path.read_text().replace('    (43 "Eco2.User" user)\n', ""))
     original = target_path.read_bytes()
 
     runner = CliRunner()
@@ -225,9 +223,7 @@ def test_reuse_refuses_on_layer_stackup_mismatch(tmp_path: Path) -> None:
 def test_reuse_allow_layer_mismatch_proceeds(tmp_path: Path) -> None:
     """``allow_layer_mismatch = true`` in the block config lets the apply proceed."""
     config_path, target_path = _stage_target_project(tmp_path)
-    target_path.write_text(
-        target_path.read_text().replace('    (43 "Eco2.User" user)\n', "")
-    )
+    target_path.write_text(target_path.read_text().replace('    (43 "Eco2.User" user)\n', ""))
     config_path.write_text(
         config_path.read_text().replace(
             'anchor = "ANCHOR1"',

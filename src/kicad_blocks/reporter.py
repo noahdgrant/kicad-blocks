@@ -148,9 +148,7 @@ def format_apply_plan(plan: ApplyPlan, *, dry_run: bool) -> str:
         for g in plan.excluded_graphics:
             lines.append(f"    - {g.layer}")
     if plan.layer_mismatch:
-        lines.append(
-            "  warning: layer stackup differs (allow_layer_mismatch override in effect):"
-        )
+        lines.append("  warning: layer stackup differs (allow_layer_mismatch override in effect):")
         for note in plan.layer_mismatch:
             lines.append(f"    {note}")
     if plan.unmatched_source:

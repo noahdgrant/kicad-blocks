@@ -298,9 +298,7 @@ def _validate(path: Path, raw: str, data: dict[str, Any]) -> Config:
                     errors.append(
                         ConfigError(
                             path=path,
-                            message=(
-                                f"'{key_path}.allow_layer_mismatch' must be a boolean"
-                            ),
+                            message=(f"'{key_path}.allow_layer_mismatch' must be a boolean"),
                             line=_find_section_line(raw, key_path),
                             key_path=f"{key_path}.allow_layer_mismatch",
                         )
