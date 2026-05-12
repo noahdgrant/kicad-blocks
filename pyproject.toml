@@ -46,30 +46,82 @@ build-backend = "hatchling.build"
 packages = ["src/kicad_blocks"]
 
 [tool.ruff]
-line-length = 100
 target-version = "py311"
-src = ["src", "tests"]
+line-length = 100
+extend-exclude = [".venv", "dist", "build"]
 
 [tool.ruff.lint]
+preview = true
+explicit-preview-rules = true
 select = [
-    "A",   # flake8-builtins
-    "B",   # flake8-bugbear
-    "C4",  # flake8-comprehensions
     "E",   # pycodestyle errors
     "F",   # pyflakes
     "I",   # isort
-    "N",   # pep8-naming
-    "RUF", # ruff-specific
-    "SIM", # flake8-simplify
+    "B",   # flake8-bugbear
     "UP",  # pyupgrade
-    "W",   # pycodestyle warnings
+    "N",   # pep8-naming
+    "SIM", # flake8-simplify
 ]
+extend-select = [
+    "ANN",     # flake8-annotations — require type annotations
+    "ARG",     # flake8-unused-arguments
+    "ASYNC",   # flake8-async — async correctness (blocking calls in coroutines)
+    "B021",    # f-string used as docstring
+    "C4",      # flake8-comprehensions — cleaner comprehensions
+    "DOC",     # pydoclint — docstring argument/return/raises correctness
+    "D1",      # pydocstyle — require docstrings (D101-D107)
+    "DTZ",     # flake8-datetimez — require timezone-aware datetimes
+    "ERA001",  # commented-out code
+    "G",       # flake8-logging-format — correct logging format strings
+    "LOG",     # flake8-logging — logging best practices
+    "N",       # pep8-naming
+    "PIE",     # flake8-pie — misc anti-patterns
+    "PLC0415", # pylint: imports must be at top of module
+    "PTH",     # flake8-use-pathlib — prefer pathlib over os.path
+    "RET",     # flake8-return — consistent return statements
+    "RUF",     # ruff-specific rules
+    "S105",    # hardcoded password string
+    "S106",    # hardcoded password func arg
+    "S107",    # hardcoded password default
+    "T20",     # flake8-print — forbid print()
+    "TD004",   # missing colon in TODO
+    "TD005",   # missing issue description in TODO
+    "TD006",   # invalid TODO capitalization
+    "TD007",   # missing space after colon in TODO
+    "TRY",     # tryceratops — exception handling best practices
+]
+ignore = [
+    "D100",   # Missing docstring in public module
+    "D104",   # Missing docstring in public package
+    "TRY003", # Long messages outside exception class — fires on short
+              # messages too; we keep the rest of TRY for real signal
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests sometimes need `Any` to work around partial upstream type stubs.
+"tests/**/*.py" = ["ANN401"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+docstring-code-format = true
 
 [tool.pyright]
 include = ["src", "tests"]
 pythonVersion = "3.11"
 typeCheckingMode = "strict"
+exclude = [
+    ".venv",
+    "**/__pycache__",
+    "dist",
+    "build",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["--strict-markers", "--strict-config"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "-ra",
+]
