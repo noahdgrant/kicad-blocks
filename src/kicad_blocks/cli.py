@@ -1,12 +1,12 @@
-import click
+from importlib.metadata import version
 
-from kicad_blocks import __version__
+import click
 
 _HELP = "Share schematic sheets across multiple KiCAD projects and reuse their PCB layouts."
 
 
 @click.group(help=_HELP)
-@click.version_option(__version__, prog_name="kicad-blocks")
+@click.version_option(version("kicad-blocks"), prog_name="kicad-blocks")
 def main() -> None:
     """kicad-blocks CLI entry point."""
 
