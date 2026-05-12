@@ -4,7 +4,7 @@ Share schematic sheets across multiple KiCAD projects and reuse their PCB layout
 
 `kicad-blocks` is a CLI that lets you treat hierarchical schematic sheets as the source of truth for a section of a board (MCU subsystem, power, etc.) and replay that section's layout across multiple PCB projects. One MCU sheet, many boards — modular dev panels, all-in-one dev boards, space-constrained production boards — without copy-paste or DNP gymnastics.
 
-> Status: pre-alpha. The v0.1 PRD is tracked in this repo's issues.
+> Status: pre-alpha. The v0.1 PRD lives at [issue #1](https://github.com/noahdgrant/kicad-blocks/issues/1) and the implementation slices at issues [#2–#13](https://github.com/noahdgrant/kicad-blocks/milestone/1).
 
 ## What it does
 
@@ -28,6 +28,10 @@ Not yet published. Once v0.1 ships:
 ```sh
 pipx install kicad-blocks
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup, the conventional commit format, and how to run the test/lint/typecheck stack locally.
 
 ## License
 
