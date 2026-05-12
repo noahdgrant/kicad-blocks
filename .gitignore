@@ -8,7 +8,6 @@ build/
 dist/
 .venv/
 venv/
-.python-version
 
 # Tooling
 .pytest_cache/

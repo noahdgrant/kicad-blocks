@@ -1,0 +1,127 @@
+[project]
+name = "kicad-blocks"
+version = "0.0.0"
+description = "Share schematic sheets across multiple KiCAD projects and reuse their PCB layouts."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Noah Grant" }]
+requires-python = ">=3.11"
+keywords = ["kicad", "pcb", "eda", "electronics", "hardware"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+]
+dependencies = [
+    "click>=8.1.7",
+]
+
+[project.scripts]
+kicad-blocks = "kicad_blocks.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/noahdgrant/kicad-blocks"
+Repository = "https://github.com/noahdgrant/kicad-blocks"
+Issues = "https://github.com/noahdgrant/kicad-blocks/issues"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pyright>=1.1.380",
+    "ruff>=0.6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kicad_blocks"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = [".venv", "dist", "build"]
+
+[tool.ruff.lint]
+preview = true
+explicit-preview-rules = true
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "N",   # pep8-naming
+    "SIM", # flake8-simplify
+]
+extend-select = [
+    "ANN",     # flake8-annotations — require type annotations
+    "ARG",     # flake8-unused-arguments
+    "ASYNC",   # flake8-async — async correctness (blocking calls in coroutines)
+    "B021",    # f-string used as docstring
+    "C4",      # flake8-comprehensions — cleaner comprehensions
+    "DOC",     # pydoclint — docstring argument/return/raises correctness
+    "D1",      # pydocstyle — require docstrings (D101-D107)
+    "DTZ",     # flake8-datetimez — require timezone-aware datetimes
+    "ERA001",  # commented-out code
+    "G",       # flake8-logging-format — correct logging format strings
+    "LOG",     # flake8-logging — logging best practices
+    "N",       # pep8-naming
+    "PIE",     # flake8-pie — misc anti-patterns
+    "PLC0415", # pylint: imports must be at top of module
+    "PTH",     # flake8-use-pathlib — prefer pathlib over os.path
+    "RET",     # flake8-return — consistent return statements
+    "RUF",     # ruff-specific rules
+    "S105",    # hardcoded password string
+    "S106",    # hardcoded password func arg
+    "S107",    # hardcoded password default
+    "T20",     # flake8-print — forbid print()
+    "TD004",   # missing colon in TODO
+    "TD005",   # missing issue description in TODO
+    "TD006",   # invalid TODO capitalization
+    "TD007",   # missing space after colon in TODO
+    "TRY",     # tryceratops — exception handling best practices
+]
+ignore = [
+    "D100",   # Missing docstring in public module
+    "D104",   # Missing docstring in public package
+    "TRY003", # Long messages outside exception class — fires on short
+              # messages too; we keep the rest of TRY for real signal
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests sometimes need `Any` to work around partial upstream type stubs.
+"tests/**/*.py" = ["ANN401"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+exclude = [
+    ".venv",
+    "**/__pycache__",
+    "dist",
+    "build",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "-ra",
+]
