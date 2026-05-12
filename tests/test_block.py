@@ -139,26 +139,53 @@ def test_plan_apply_fails_fast_on_missing_target_anchor() -> None:
         )
 
 
-def test_plan_apply_fails_fast_on_net_mismatch(tmp_path: Path) -> None:
-    """An in-block source net not present in the target aborts before any write."""
+def test_plan_apply_reports_unresolved_nets_instead_of_raising(tmp_path: Path) -> None:
+    """A net in the source block but missing from the target surfaces in the plan.
+
+    Slice 3 raised; Slice 4 lets the planner produce a plan with the unresolved
+    list so ``reuse --dry-run`` can show the diff before the user fixes it. The
+    CLI aborts the actual apply when ``unresolved_nets`` is non-empty.
+    """
     # Build a target PCB missing the SIG net.
     target_text = TARGET_PCB.read_text()
-    bad_target_text = target_text.replace('(net 3 "SIG")\n', "").replace(
-        '(net 3 "SIG")', '(net 99 "OTHER")'
-    )
+    bad_target_text = target_text.replace('(net 3 "SIG")\n', "")
     bad_target = tmp_path / "target.kicad_pcb"
     bad_target.write_text(bad_target_text)
 
     source = load_pcb(SOURCE_PCB)
     target = load_pcb(bad_target)
 
-    with pytest.raises(ApplyError, match="net"):
-        plan_apply(
-            source_pcb=source,
-            target_pcb=target,
-            sheet="sheets/mcu.kicad_sch",
-            anchor_ref="ANCHOR1",
-        )
+    plan = plan_apply(
+        source_pcb=source,
+        target_pcb=target,
+        sheet="sheets/mcu.kicad_sch",
+        anchor_ref="ANCHOR1",
+    )
+
+    assert "SIG" in plan.unresolved_nets
+
+
+def test_plan_apply_resolves_renamed_nets_via_overrides(tmp_path: Path) -> None:
+    """A target with renamed nets resolves cleanly when overrides cover the diff."""
+    # Rename the target's SIG net to SIG_T; without an override this would be unresolved.
+    target_text = TARGET_PCB.read_text().replace('"SIG"', '"SIG_T"')
+    renamed_target = tmp_path / "target.kicad_pcb"
+    renamed_target.write_text(target_text)
+
+    source = load_pcb(SOURCE_PCB)
+    target = load_pcb(renamed_target)
+
+    plan = plan_apply(
+        source_pcb=source,
+        target_pcb=target,
+        sheet="sheets/mcu.kicad_sch",
+        anchor_ref="ANCHOR1",
+        net_overrides={"SIG": "SIG_T"},
+    )
+
+    assert plan.unresolved_nets == ()
+    assert plan.net_map.lookup("SIG") == "SIG_T"
+    assert plan.net_map.lookup("GND") == "GND"
 
 
 def test_plan_apply_reports_unmatched_source_footprints(tmp_path: Path) -> None:

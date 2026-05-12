@@ -126,3 +126,60 @@ def test_block_anchor_wrong_type_reports_error(tmp_path: Path) -> None:
     with pytest.raises(InvalidConfigError) as excinfo:
         load_config(bad)
     assert any("anchor" in err.message for err in excinfo.value.errors)
+
+
+def test_block_net_map_parses(tmp_path: Path) -> None:
+    """``[blocks.<name>.net_map]`` parses into the BlockSpec's net_map mapping."""
+    config_path = tmp_path / "kicad-blocks.toml"
+    config_path.write_text(
+        'project = "x"\n'
+        'sources = ["a.kicad_pcb"]\n'
+        "\n[blocks.mcu]\n"
+        'sheet = "sheets/mcu.kicad_sch"\n'
+        "\n[blocks.mcu.net_map]\n"
+        '"+3v3_source" = "+3V3"\n'
+        '"GND_OLD" = "GND"\n'
+    )
+    config = load_config(config_path)
+    assert config.blocks["mcu"].net_map == {"+3v3_source": "+3V3", "GND_OLD": "GND"}
+
+
+def test_block_net_map_defaults_to_empty(tmp_path: Path) -> None:
+    """When ``net_map`` is absent the BlockSpec's net_map is an empty mapping."""
+    config_path = tmp_path / "kicad-blocks.toml"
+    config_path.write_text(
+        'project = "x"\nsources = ["a.kicad_pcb"]\n\n[blocks.mcu]\nsheet = "sheets/mcu.kicad_sch"\n'
+    )
+    config = load_config(config_path)
+    assert config.blocks["mcu"].net_map == {}
+
+
+def test_block_net_map_wrong_type_reports_error(tmp_path: Path) -> None:
+    """``net_map`` must be a table; a scalar value surfaces a typed error."""
+    bad = tmp_path / "kicad-blocks.toml"
+    bad.write_text(
+        'project = "x"\n'
+        'sources = ["a.kicad_pcb"]\n'
+        "\n[blocks.mcu]\n"
+        'sheet = "sheets/mcu.kicad_sch"\n'
+        'net_map = "not-a-table"\n'
+    )
+    with pytest.raises(InvalidConfigError) as excinfo:
+        load_config(bad)
+    assert any("net_map" in err.message for err in excinfo.value.errors)
+
+
+def test_block_net_map_non_string_values_report_error(tmp_path: Path) -> None:
+    """Each entry in ``net_map`` must be a string-to-string pair."""
+    bad = tmp_path / "kicad-blocks.toml"
+    bad.write_text(
+        'project = "x"\n'
+        'sources = ["a.kicad_pcb"]\n'
+        "\n[blocks.mcu]\n"
+        'sheet = "sheets/mcu.kicad_sch"\n'
+        "\n[blocks.mcu.net_map]\n"
+        '"+3v3_source" = 7\n'
+    )
+    with pytest.raises(InvalidConfigError) as excinfo:
+        load_config(bad)
+    assert any("net_map" in err.message for err in excinfo.value.errors)

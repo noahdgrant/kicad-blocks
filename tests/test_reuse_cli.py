@@ -101,3 +101,51 @@ def test_reuse_requires_target_field(tmp_path: Path) -> None:
 
     assert result.exit_code != 0
     assert "target" in result.output.lower()
+
+
+def _rewrite_target_sig_net(target_path: Path, new_name: str) -> None:
+    text = target_path.read_text()
+    target_path.write_text(text.replace('"SIG"', f'"{new_name}"'))
+
+
+def test_reuse_dry_run_surfaces_unresolved_nets(tmp_path: Path) -> None:
+    """Dry-run with a divergent net name shows the unresolved entry but still exits 0."""
+    config_path, target_path = _stage_target_project(tmp_path)
+    _rewrite_target_sig_net(target_path, "SIG_T")
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["reuse", "--config", str(config_path), "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "SIG" in result.output
+    assert "net_map" in result.output
+
+
+def test_reuse_apply_refuses_with_unresolved_nets(tmp_path: Path) -> None:
+    """Without overrides, ``reuse`` (no --dry-run) refuses to write and exits non-zero."""
+    config_path, target_path = _stage_target_project(tmp_path)
+    _rewrite_target_sig_net(target_path, "SIG_T")
+    original = target_path.read_bytes()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["reuse", "--config", str(config_path)])
+
+    assert result.exit_code != 0
+    assert "unresolved" in result.output.lower()
+    # Target was not mutated.
+    assert target_path.read_bytes() == original
+
+
+def test_reuse_apply_succeeds_with_net_map_overrides(tmp_path: Path) -> None:
+    """Declaring the override under ``[blocks.mcu.net_map]`` lets the apply proceed."""
+    config_path, target_path = _stage_target_project(tmp_path)
+    _rewrite_target_sig_net(target_path, "SIG_T")
+    # Append the override table to the config.
+    config_path.write_text(
+        config_path.read_text() + "\n[blocks.mcu.net_map]\n" + '"SIG" = "SIG_T"\n'
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["reuse", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output

@@ -8,18 +8,22 @@ Two halves live here:
   a sheet, and the target's anchor refdes, return a structured
   :class:`ApplyPlan` that says exactly which target footprints get moved where.
 
-Slice 3 is footprint-only; tracks, vias, zones, and silkscreen all arrive in
-later slices. The net check here is a stub per the issue: if any net referenced
-by an in-block source footprint is missing from the target's net list, we fail
-fast. Slice 4 replaces this with a real ``net_map``.
+Slice 3 was footprint-only with a stub net check; Slice 4 replaces the stub
+with the real ``net_map`` module: auto-match by name, explicit per-block
+overrides, and an ``unresolved_nets`` list carried on the plan. The CLI uses
+that list to refuse the actual apply and to surface the diff in ``--dry-run``.
+Tracks, vias, zones, and silkscreen still arrive in later slices.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from kicad_blocks.kicad_io import Footprint, FootprintPlacement, Pcb
+from kicad_blocks.net_map import NetMap
+from kicad_blocks.net_map import build as build_net_map
 from kicad_blocks.transform import Transform
 
 
@@ -56,6 +60,10 @@ class PlannedPlacement:
         )
 
 
+def _empty_net_map() -> NetMap:
+    return NetMap(mapping={})
+
+
 @dataclass(frozen=True)
 class ApplyPlan:
     """The full plan produced by :func:`plan_apply`.
@@ -72,6 +80,11 @@ class ApplyPlan:
         unmatched_source: Symbol UUIDs of source-block footprints that had no
             counterpart in the target. Surfaced so dry-run can report them;
             the apply itself does not write anything for these.
+        net_map: Resolved source-net → target-net mapping for this block.
+        unresolved_nets: Source net names with no auto-match and no override
+            entry pointing at an existing target net. Non-empty means the
+            actual apply must be refused; ``--dry-run`` still prints the plan
+            so the user can see what to fix.
     """
 
     sheet: str
@@ -80,6 +93,8 @@ class ApplyPlan:
     transform_angle_deg: float
     placements: tuple[PlannedPlacement, ...]
     unmatched_source: tuple[str, ...]
+    net_map: NetMap = field(default_factory=_empty_net_map)
+    unresolved_nets: tuple[str, ...] = ()
 
 
 def footprints_in_sheet(pcb: Pcb, sheet: str | Path) -> list[Footprint]:
@@ -107,6 +122,7 @@ def plan_apply(
     target_pcb: Pcb,
     sheet: str | Path,
     anchor_ref: str,
+    net_overrides: Mapping[str, str] | None = None,
 ) -> ApplyPlan:
     """Plan the footprint half of ``reuse`` for a single block.
 
@@ -118,22 +134,29 @@ def plan_apply(
        anchor's frame.
     4. For each in-block source footprint (excluding the anchor), find the
        target footprint by symbol UUID and compute its new position/rotation.
-    5. Verify every net referenced by an in-block source footprint exists in
-       the target's net list.
+    5. Resolve every net referenced by an in-block source footprint against
+       the target's net list, applying ``net_overrides`` for divergent names.
+
+    Net resolution is permissive: unresolved names are returned on the plan
+    (``unresolved_nets``) rather than raised, so the dry-run path can show the
+    full diff. The CLI refuses the actual apply when ``unresolved_nets`` is
+    non-empty.
 
     Args:
         source_pcb: The source PCB whose layout is canonical for the block.
         target_pcb: The target PCB; ``anchor_ref`` is its anchor refdes.
         sheet: The shared sheet path used to scope the block.
         anchor_ref: The anchor footprint's refdes in the target PCB.
+        net_overrides: Optional source-name → target-name overrides from the
+            config's ``[blocks.<name>.net_map]`` table.
 
     Returns:
         A structured :class:`ApplyPlan`.
 
     Raises:
-        ApplyError: If the anchor can't be found, the source has no matching
-            anchor symbol, or any in-block source net is missing from the
-            target.
+        ApplyError: If the anchor can't be found or the source has no matching
+            anchor symbol. Net mismatches do *not* raise — they populate
+            ``unresolved_nets`` on the returned plan.
     """
     target_anchor = _find_by_reference(target_pcb, anchor_ref)
     if target_anchor is None:
@@ -165,7 +188,12 @@ def plan_apply(
         )
         raise ApplyError(msg)
 
-    _check_nets(source_block, target_pcb, sheet)
+    block_nets = _collect_block_nets(source_block)
+    net_map, unresolved_nets = build_net_map(
+        source_nets=block_nets,
+        target_nets=target_pcb.nets,
+        overrides=net_overrides,
+    )
 
     transform = Transform.from_anchors(
         source=source_anchor.position,
@@ -207,32 +235,22 @@ def plan_apply(
         transform_angle_deg=transform.angle_deg,
         placements=tuple(placements),
         unmatched_source=tuple(unmatched),
+        net_map=net_map,
+        unresolved_nets=tuple(unresolved_nets),
     )
 
 
-def _check_nets(source_block: list[Footprint], target_pcb: Pcb, sheet: str | Path) -> None:
-    """Raise :class:`ApplyError` if any in-block source net is missing from target.
-
-    This is the Slice 3 stub — Slice 4 replaces it with ``net_map`` that allows
-    explicit overrides for mismatched names. For now: exact match by name.
-    """
-    target_nets = set(target_pcb.nets)
-    missing: list[str] = []
+def _collect_block_nets(source_block: list[Footprint]) -> list[str]:
+    """Return the deduped list of net names referenced by ``source_block``'s pads."""
     seen: set[str] = set()
+    nets: list[str] = []
     for fp in source_block:
         for net in fp.pad_nets:
             if net in seen:
                 continue
             seen.add(net)
-            if net not in target_nets:
-                missing.append(net)
-    if missing:
-        msg = (
-            f"net mismatch on sheet '{sheet}': source references net(s) "
-            f"{sorted(missing)} that are not present in target PCB "
-            f"{target_pcb.path}"
-        )
-        raise ApplyError(msg)
+            nets.append(net)
+    return nets
 
 
 def _find_by_reference(pcb: Pcb, reference: str) -> Footprint | None:

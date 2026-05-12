@@ -151,20 +151,30 @@ def reuse(config_path: Path, dry_run: bool) -> None:
         raise SystemExit(1)
 
     target_path = _resolve(config, config.target)
-    plans: list[ApplyPlan] = []
+    plans: list[tuple[BlockSpec, ApplyPlan]] = []
     for spec in actionable:
         try:
             plan = _plan_block(config, spec, target_path)
         except (KicadIoError, ApplyError) as exc:
             click.echo(f"error: {exc}")
             raise SystemExit(1) from None
-        plans.append(plan)
+        plans.append((spec, plan))
         click.echo(format_apply_plan(plan, dry_run=dry_run))
 
     if dry_run:
         return
 
-    all_placements = [p.placement for plan in plans for p in plan.placements]
+    blocked = [(spec, plan) for spec, plan in plans if plan.unresolved_nets]
+    if blocked:
+        for spec, plan in blocked:
+            click.echo(
+                f"error: block '{spec.name}' has unresolved net(s) "
+                f"{list(plan.unresolved_nets)} — declare overrides in "
+                f"[blocks.{spec.name}.net_map] or rename in the target PCB"
+            )
+        raise SystemExit(1)
+
+    all_placements = [p.placement for _, plan in plans for p in plan.placements]
     if not all_placements:
         return
     try:
@@ -186,6 +196,7 @@ def _plan_block(config: Config, spec: BlockSpec, target_path: Path) -> ApplyPlan
         target_pcb=target_pcb,
         sheet=str(spec.sheet),
         anchor_ref=spec.anchor,
+        net_overrides=spec.net_map,
     )
 
 
