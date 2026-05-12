@@ -7,19 +7,23 @@ boundary that absorbs file-format churn — this is it.
 
 # pyright: reportMissingTypeStubs=false, reportUnknownMemberType=false
 # pyright: reportUnknownVariableType=false, reportUnknownArgumentType=false
+# pyright: reportAttributeAccessIssue=false, reportArgumentType=false
 
 from __future__ import annotations
 
+import copy
 import os
 import tempfile
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from kiutils.board import Board
 from kiutils.items.brditems import Segment, Via
 from kiutils.items.common import Position
+
+from kicad_blocks.transform import Transform
 
 
 class KicadIoError(Exception):
@@ -118,6 +122,64 @@ class ViaItem:
 
 
 @dataclass(frozen=True)
+class LayerInfo:
+    """A single board-layer entry, as declared in the ``layers`` token.
+
+    Attributes:
+        name: The canonical layer name (e.g. ``F.Cu``).
+        type: The layer type — one of ``signal``, ``power``, ``mixed``,
+            ``jumper``, or ``user``.
+    """
+
+    name: str
+    type: str
+
+
+@dataclass(frozen=True)
+class ZoneItem:
+    """A board-level zone (copper fill or keepout) read from a ``.kicad_pcb`` file.
+
+    Attributes:
+        net_name: The zone's net as a string (``""`` for keepouts and
+            unconnected fills).
+        layers: Canonical layer names the zone spans.
+        outline_points: All polygon-outline vertices, flattened across every
+            outline polygon. Used by the planner for boundary checks.
+        raw: Opaque reference to the kiutils ``Zone`` object — apply_placements
+            deep-copies and transforms this to write the zone back without
+            losing fill settings, hatching, priority, etc.
+    """
+
+    net_name: str
+    layers: tuple[str, ...]
+    outline_points: tuple[tuple[float, float], ...]
+    raw: object = field(repr=False)
+
+
+@dataclass(frozen=True)
+class GraphicItem:
+    """A board-level graphical item read from a ``.kicad_pcb`` file.
+
+    Covers ``gr_text``, ``gr_line``, ``gr_rect``, ``gr_circle``, ``gr_arc``,
+    ``gr_poly``, and ``gr_curve``. Footprint-attached graphics travel with
+    their footprint and don't appear here.
+
+    Attributes:
+        layer: Canonical layer name (e.g. ``F.SilkS``). Empty string when
+            kiutils reports a missing layer.
+        points: All key coordinate points (positions, endpoints, polygon
+            vertices), flattened. Used by the planner for hull-containment
+            checks.
+        raw: Opaque reference to the kiutils ``Gr*`` object — same role as
+            :attr:`ZoneItem.raw`.
+    """
+
+    layer: str
+    points: tuple[tuple[float, float], ...]
+    raw: object = field(repr=False)
+
+
+@dataclass(frozen=True)
 class Pcb:
     """A loaded ``.kicad_pcb`` file.
 
@@ -128,6 +190,9 @@ class Pcb:
             unconnected ``""`` net), in source order.
         tracks: All track segments in the file, in source order.
         vias: All vias in the file, in source order.
+        layers: The board's layer stackup table in source order.
+        zones: All board-level zones in source order.
+        graphics: All board-level graphical items in source order.
     """
 
     path: Path
@@ -135,6 +200,9 @@ class Pcb:
     nets: tuple[str, ...] = ()
     tracks: tuple[Track, ...] = ()
     vias: tuple[ViaItem, ...] = ()
+    layers: tuple[LayerInfo, ...] = ()
+    zones: tuple[ZoneItem, ...] = ()
+    graphics: tuple[GraphicItem, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -184,6 +252,38 @@ class ViaPlacement:
     net_name: str
 
 
+@dataclass(frozen=True)
+class ZonePlacement:
+    """A zone to append to a target PCB.
+
+    Carries an opaque reference to the source kiutils ``Zone`` plus the
+    transform and target-side net name. :func:`apply_placements` deep-copies
+    ``source_raw``, rewrites its polygon coordinates through ``transform``,
+    and resolves ``net_name`` against the target's net table. Keeping the
+    kiutils round-trip inside this module preserves the "kiutils stays here"
+    boundary; the planner only knows about typed values.
+    """
+
+    source_raw: object
+    transform: Transform
+    net_name: str
+    layers: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class GraphicPlacement:
+    """A board-level graphic to append to a target PCB.
+
+    Same shape as :class:`ZonePlacement`: an opaque reference to the source
+    kiutils ``Gr*`` item, the transform to apply, and the layer for the
+    reporter to surface. There is no net to resolve.
+    """
+
+    source_raw: object
+    transform: Transform
+    layer: str
+
+
 def load_pcb(path: Path) -> Pcb:
     """Load a ``.kicad_pcb`` file into the typed ``Pcb`` model.
 
@@ -191,8 +291,8 @@ def load_pcb(path: Path) -> Pcb:
         path: Filesystem path to the board file.
 
     Returns:
-        A ``Pcb`` populated with the file's footprints, net names, tracks, and
-        vias.
+        A ``Pcb`` populated with the file's footprints, net names, tracks,
+        vias, layer stackup, zones, and board-level graphics.
 
     Raises:
         KicadIoError: If the file does not exist or cannot be parsed.
@@ -208,12 +308,20 @@ def load_pcb(path: Path) -> Pcb:
             tracks.append(_convert_segment(item, nets_by_number))
         elif isinstance(item, Via):
             vias.append(_convert_via(item, nets_by_number))
+    layers = tuple(
+        LayerInfo(name=str(layer.name or ""), type=str(layer.type or "")) for layer in board.layers
+    )
+    zones = tuple(_convert_zone(z) for z in board.zones)
+    graphics = tuple(_convert_graphic(g) for g in board.graphicItems)
     return Pcb(
         path=path,
         footprints=footprints,
         nets=nets,
         tracks=tuple(tracks),
         vias=tuple(vias),
+        layers=layers,
+        zones=zones,
+        graphics=graphics,
     )
 
 
@@ -223,13 +331,22 @@ def apply_placements(
     *,
     tracks: Sequence[TrackPlacement] = (),
     vias: Sequence[ViaPlacement] = (),
+    zones: Sequence[ZonePlacement] = (),
+    graphics: Sequence[GraphicPlacement] = (),
 ) -> None:
     """Apply mutations to the PCB at ``path``, atomically.
 
     Footprints in ``placements`` are *moved* (located by symbol UUID and
-    overwritten in place). Tracks and vias are *appended* to the board's
-    routing — Slice 5 does not remove or deduplicate existing routing; that
-    arrives with the sync apply (Slice 8).
+    overwritten in place). Tracks, vias, zones, and graphics are *appended*
+    to the board — the slice 6 apply does not remove or deduplicate existing
+    items; that arrives with the sync apply (Slice 8).
+
+    Zones and graphics carry an opaque reference to the source kiutils item.
+    They are deep-copied here, their coordinates transformed by
+    ``ZonePlacement.transform``/``GraphicPlacement.transform``, and net names
+    on zones are resolved against the target's net table. Cached
+    ``filled_polygon`` data is dropped from copied zones — KiCAD will
+    regenerate it on the next Pour.
 
     The write is atomic: the result is composed in a temp file in the same
     directory and ``os.replace``d onto the original. On any failure the
@@ -241,11 +358,15 @@ def apply_placements(
         tracks: Track segments to append, with net names already resolved to
             target-side spelling.
         vias: Vias to append, same convention as ``tracks``.
+        zones: Zones to append, carrying an opaque kiutils source ref + a
+            transform + a target-side net name.
+        graphics: Board-level graphics to append, same convention as zones
+            but without a net.
 
     Raises:
         KicadIoError: If the file cannot be read or written, if any footprint
-            placement does not match the target, or if any track/via references
-            a net name absent from the target's net table.
+            placement does not match the target, or if any track/via/zone
+            references a net name absent from the target's net table.
     """
     board = _load_board(path)
 
@@ -268,6 +389,9 @@ def apply_placements(
     for via_placement in vias:
         if via_placement.net_name not in nets_by_name:
             missing_nets.append(via_placement.net_name)
+    for zone_placement in zones:
+        if zone_placement.net_name and zone_placement.net_name not in nets_by_name:
+            missing_nets.append(zone_placement.net_name)
     if missing_nets:
         msg = f"target PCB is missing net(s): {', '.join(sorted(set(missing_nets)))}"
         raise KicadIoError(msg)
@@ -280,6 +404,11 @@ def apply_placements(
         board.traceItems.append(_build_segment(track_placement, nets_by_name))
     for via_placement in vias:
         board.traceItems.append(_build_via(via_placement, nets_by_name))
+
+    for zone_placement in zones:
+        board.zones.append(_build_zone(zone_placement, nets_by_name))
+    for graphic_placement in graphics:
+        board.graphicItems.append(_build_graphic(graphic_placement))
 
     _write_board_atomic(board, path)
 
@@ -429,6 +558,126 @@ def _build_via(placement: ViaPlacement, nets_by_name: dict[str, int]) -> Via:
         net=nets_by_name[placement.net_name],
         tstamp=str(uuid.uuid4()),
     )
+
+
+_GRAPHIC_POINT_ATTRS = ("position", "start", "end", "mid", "center")
+_GRAPHIC_LIST_ATTRS = ("coordinates",)
+
+
+def _convert_zone(zone: object) -> ZoneItem:
+    """Convert a kiutils ``Zone`` to our typed :class:`ZoneItem` model."""
+    points: list[tuple[float, float]] = []
+    for polygon in getattr(zone, "polygons", []) or []:
+        for p in getattr(polygon, "coordinates", []) or []:
+            points.append((float(getattr(p, "X", 0.0) or 0.0), float(getattr(p, "Y", 0.0) or 0.0)))
+    return ZoneItem(
+        net_name=str(getattr(zone, "netName", "") or ""),
+        layers=tuple(str(layer) for layer in (getattr(zone, "layers", []) or [])),
+        outline_points=tuple(points),
+        raw=zone,
+    )
+
+
+def _convert_graphic(item: object) -> GraphicItem:
+    """Convert a kiutils ``Gr*`` item to our typed :class:`GraphicItem` model."""
+    points = _collect_graphic_points(item)
+    layer = str(getattr(item, "layer", "") or "")
+    return GraphicItem(layer=layer, points=points, raw=item)
+
+
+def _collect_graphic_points(item: object) -> tuple[tuple[float, float], ...]:
+    """Return all coordinate points of a kiutils ``Gr*`` item, flattened.
+
+    Walks the common attribute names — single positions (``position``,
+    ``start``, ``end``, ``mid``, ``center``) and lists (``coordinates``).
+    """
+    points: list[tuple[float, float]] = []
+    for attr in _GRAPHIC_POINT_ATTRS:
+        p = getattr(item, attr, None)
+        if p is not None and hasattr(p, "X") and hasattr(p, "Y"):
+            points.append((float(getattr(p, "X", 0.0) or 0.0), float(getattr(p, "Y", 0.0) or 0.0)))
+    for attr in _GRAPHIC_LIST_ATTRS:
+        coords = getattr(item, attr, None)
+        if not coords:
+            continue
+        for p in coords:
+            if hasattr(p, "X") and hasattr(p, "Y"):
+                points.append(
+                    (float(getattr(p, "X", 0.0) or 0.0), float(getattr(p, "Y", 0.0) or 0.0))
+                )
+    return tuple(points)
+
+
+def _build_zone(placement: ZonePlacement, nets_by_name: dict[str, int]) -> object:
+    """Deep-copy the source kiutils ``Zone``, rewrite its coordinates + net, return it.
+
+    The ``filled_polygon`` cache is dropped — those are a computed fill result
+    and won't survive a non-identity transform cleanly. KiCAD's Pour command
+    regenerates them when the target is next opened.
+    """
+    copied = copy.deepcopy(placement.source_raw)
+    _transform_zone_polygons(copied, placement.transform)
+    if hasattr(copied, "netName"):
+        copied.netName = placement.net_name
+    if hasattr(copied, "net"):
+        copied.net = nets_by_name.get(placement.net_name, 0)
+    if hasattr(copied, "filledPolygons"):
+        copied.filledPolygons = []
+    if hasattr(copied, "tstamp"):
+        copied.tstamp = str(uuid.uuid4())
+    return copied
+
+
+def _build_graphic(placement: GraphicPlacement) -> object:
+    """Deep-copy the source kiutils ``Gr*`` item and rewrite its coordinates."""
+    copied = copy.deepcopy(placement.source_raw)
+    _transform_graphic_points(copied, placement.transform)
+    if hasattr(copied, "tstamp"):
+        copied.tstamp = str(uuid.uuid4())
+    return copied
+
+
+def _transform_zone_polygons(zone: object, transform: Transform) -> None:
+    """Mutate a kiutils ``Zone`` so its outline polygon coordinates ride ``transform``."""
+    for polygon in getattr(zone, "polygons", []) or []:
+        for p in getattr(polygon, "coordinates", []) or []:
+            x = float(getattr(p, "X", 0.0) or 0.0)
+            y = float(getattr(p, "Y", 0.0) or 0.0)
+            nx, ny = transform.apply((x, y))
+            p.X = nx
+            p.Y = ny
+
+
+def _transform_graphic_points(item: object, transform: Transform) -> None:
+    """Mutate a kiutils ``Gr*`` item so all its coordinate points ride ``transform``.
+
+    Walks the same attribute set as :func:`_collect_graphic_points`. When a
+    point also carries an ``angle`` (kiutils ``Position`` does for ``gr_text``),
+    rotate that too so text orientation follows the block.
+    """
+    for attr in _GRAPHIC_POINT_ATTRS:
+        p = getattr(item, attr, None)
+        if p is None or not hasattr(p, "X") or not hasattr(p, "Y"):
+            continue
+        x = float(getattr(p, "X", 0.0) or 0.0)
+        y = float(getattr(p, "Y", 0.0) or 0.0)
+        nx, ny = transform.apply((x, y))
+        p.X = nx
+        p.Y = ny
+        if hasattr(p, "angle") and getattr(p, "angle", None) is not None:
+            p.angle = transform.apply_angle(float(p.angle))
+    for attr in _GRAPHIC_LIST_ATTRS:
+        coords = getattr(item, attr, None)
+        if not coords:
+            continue
+        for p in coords:
+            if not (hasattr(p, "X") and hasattr(p, "Y")):
+                continue
+            x = float(getattr(p, "X", 0.0) or 0.0)
+            y = float(getattr(p, "Y", 0.0) or 0.0)
+            nx, ny = transform.apply((x, y))
+            p.X = nx
+            p.Y = ny
 
 
 def _extract_symbol_uuid(path: str | None) -> str | None:

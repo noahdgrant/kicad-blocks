@@ -177,10 +177,19 @@ def reuse(config_path: Path, dry_run: bool) -> None:
     all_placements = [p.placement for _, plan in plans for p in plan.placements]
     all_tracks = [t for _, plan in plans for t in plan.tracks]
     all_vias = [v for _, plan in plans for v in plan.vias]
-    if not all_placements and not all_tracks and not all_vias:
+    all_zones = [z for _, plan in plans for z in plan.zones]
+    all_graphics = [g for _, plan in plans for g in plan.graphics]
+    if not (all_placements or all_tracks or all_vias or all_zones or all_graphics):
         return
     try:
-        apply_placements(target_path, all_placements, tracks=all_tracks, vias=all_vias)
+        apply_placements(
+            target_path,
+            all_placements,
+            tracks=all_tracks,
+            vias=all_vias,
+            zones=all_zones,
+            graphics=all_graphics,
+        )
     except KicadIoError as exc:
         click.echo(f"error: {exc}")
         raise SystemExit(1) from None
@@ -199,6 +208,7 @@ def _plan_block(config: Config, spec: BlockSpec, target_path: Path) -> ApplyPlan
         sheet=str(spec.sheet),
         anchor_ref=spec.anchor,
         net_overrides=spec.net_map,
+        allow_layer_mismatch=spec.allow_layer_mismatch,
     )
 
 

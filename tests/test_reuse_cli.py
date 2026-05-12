@@ -176,6 +176,68 @@ def test_reuse_apply_writes_tracks_and_vias(tmp_path: Path) -> None:
     assert after.vias[0].position == (210.0, 195.75)
 
 
+def test_reuse_dry_run_reports_zone_and_graphic(tmp_path: Path) -> None:
+    """Dry-run output shows the in-block zone and silkscreen graphic that will travel."""
+    config_path, _ = _stage_target_project(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["reuse", "--config", str(config_path), "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "zones (to append)" in result.output
+    assert "GND" in result.output
+    assert "graphics (to append)" in result.output
+    assert "F.SilkS" in result.output
+
+
+def test_reuse_apply_writes_zone_and_graphics(tmp_path: Path) -> None:
+    """``reuse`` writes the in-block zone and graphics into the target file."""
+    config_path, target_path = _stage_target_project(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["reuse", "--config", str(config_path)])
+    assert result.exit_code == 0, result.output
+
+    text = target_path.read_text()
+    # The GND zone is now in the target file.
+    assert '(net_name "GND")' in text
+    # And so is at least one gr_text (the in-block "MCU" label).
+    assert "(gr_text" in text
+
+
+def test_reuse_refuses_on_layer_stackup_mismatch(tmp_path: Path) -> None:
+    """A target with a different stackup is refused with a clear diff."""
+    config_path, target_path = _stage_target_project(tmp_path)
+    # Drop a user layer from the target to force a mismatch.
+    target_path.write_text(target_path.read_text().replace('    (43 "Eco2.User" user)\n', ""))
+    original = target_path.read_bytes()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["reuse", "--config", str(config_path), "--dry-run"])
+
+    assert result.exit_code != 0, result.output
+    assert "layer stackup" in result.output.lower()
+    assert "Eco2.User" in result.output
+    assert target_path.read_bytes() == original
+
+
+def test_reuse_allow_layer_mismatch_proceeds(tmp_path: Path) -> None:
+    """``allow_layer_mismatch = true`` in the block config lets the apply proceed."""
+    config_path, target_path = _stage_target_project(tmp_path)
+    target_path.write_text(target_path.read_text().replace('    (43 "Eco2.User" user)\n', ""))
+    config_path.write_text(
+        config_path.read_text().replace(
+            'anchor = "ANCHOR1"',
+            'anchor = "ANCHOR1"\nallow_layer_mismatch = true',
+        )
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["reuse", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "layer stackup" in result.output.lower()
+
+
 def test_reuse_apply_succeeds_with_net_map_overrides(tmp_path: Path) -> None:
     """Declaring the override under ``[blocks.mcu.net_map]`` lets the apply proceed."""
     config_path, target_path = _stage_target_project(tmp_path)

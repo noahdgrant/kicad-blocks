@@ -10,11 +10,13 @@ Two halves live here:
   and which in-block tracks/vias get appended to the target.
 
 Slice 3 was footprint-only with a stub net check; Slice 4 added the real
-``net_map`` module. Slice 5 carries tracks and vias through the same pipeline:
-items with both endpoints landing on in-block footprint pads are transformed
-into the target frame and surfaced on the plan, items that cross the boundary
-are reported under ``excluded_*`` so dry-run can show them. Zones and
-silkscreen still arrive in later slices.
+``net_map`` module. Slice 5 carries tracks and vias through the same pipeline.
+Slice 6 closes the reuse scope with zones and board-level graphics — both are
+filtered by an axis-aligned hull around the in-block footprint pads (padded by
+:data:`_HULL_MARGIN_MM` so surrounding silk/courtyard art is included) and
+transformed into the target frame. The same slice adds a strict source/target
+layer stackup compare; mismatches raise :class:`ApplyError` unless callers
+opt in via ``allow_layer_mismatch=True``.
 """
 
 from __future__ import annotations
@@ -27,11 +29,16 @@ from pathlib import Path
 from kicad_blocks.kicad_io import (
     Footprint,
     FootprintPlacement,
+    GraphicItem,
+    GraphicPlacement,
+    LayerInfo,
     Pcb,
     Track,
     TrackPlacement,
     ViaItem,
     ViaPlacement,
+    ZoneItem,
+    ZonePlacement,
 )
 from kicad_blocks.net_map import NetMap
 from kicad_blocks.net_map import build as build_net_map
@@ -105,6 +112,20 @@ class ApplyPlan:
             knows what was left behind.
         excluded_vias: Source-frame vias whose position doesn't land on an
             in-block footprint pad.
+        zones: Zone placements (deep-copied + transformed kiutils refs) for
+            in-hull zones to append to the target.
+        graphics: Board-level graphic placements (deep-copied + transformed)
+            for in-hull graphics to append to the target.
+        excluded_zones: Source zones whose outline falls outside the in-block
+            hull. Reported for ``--dry-run`` so the user can see what was
+            skipped; not written.
+        excluded_graphics: Source graphics outside the hull, same convention
+            as ``excluded_zones``.
+        layer_mismatch: Human-readable diff lines describing differences
+            between source and target layer stackups, populated only when
+            ``allow_layer_mismatch=True`` was passed and the stackups differ.
+            With ``allow_layer_mismatch=False`` (the default), a stackup
+            mismatch raises :class:`ApplyError` instead of populating this.
     """
 
     sheet: str
@@ -119,6 +140,11 @@ class ApplyPlan:
     vias: tuple[ViaPlacement, ...] = ()
     excluded_tracks: tuple[Track, ...] = ()
     excluded_vias: tuple[ViaItem, ...] = ()
+    zones: tuple[ZonePlacement, ...] = ()
+    graphics: tuple[GraphicPlacement, ...] = ()
+    excluded_zones: tuple[ZoneItem, ...] = ()
+    excluded_graphics: tuple[GraphicItem, ...] = ()
+    layer_mismatch: tuple[str, ...] = ()
 
 
 def footprints_in_sheet(pcb: Pcb, sheet: str | Path) -> list[Footprint]:
@@ -147,6 +173,7 @@ def plan_apply(
     sheet: str | Path,
     anchor_ref: str,
     net_overrides: Mapping[str, str] | None = None,
+    allow_layer_mismatch: bool = False,
 ) -> ApplyPlan:
     """Plan the footprint half of ``reuse`` for a single block.
 
@@ -173,15 +200,29 @@ def plan_apply(
         anchor_ref: The anchor footprint's refdes in the target PCB.
         net_overrides: Optional source-name → target-name overrides from the
             config's ``[blocks.<name>.net_map]`` table.
+        allow_layer_mismatch: When ``True``, a difference between source and
+            target layer stackups is reported on ``ApplyPlan.layer_mismatch``
+            but does not block the plan. Defaults to ``False``, which raises
+            :class:`ApplyError` on mismatch.
 
     Returns:
         A structured :class:`ApplyPlan`.
 
     Raises:
-        ApplyError: If the anchor can't be found or the source has no matching
-            anchor symbol. Net mismatches do *not* raise — they populate
-            ``unresolved_nets`` on the returned plan.
+        ApplyError: If the anchor can't be found, the source has no matching
+            anchor symbol, or the source/target layer stackups differ and
+            ``allow_layer_mismatch=False``. Net mismatches do *not* raise —
+            they populate ``unresolved_nets`` on the returned plan.
     """
+    layer_diff = _diff_layer_stackup(source_pcb.layers, target_pcb.layers)
+    if layer_diff and not allow_layer_mismatch:
+        msg = (
+            f"layer stackup differs between source PCB {source_pcb.path} and "
+            f"target PCB {target_pcb.path}; set allow_layer_mismatch = true under "
+            f"[blocks.<name>] to override.\n  " + "\n  ".join(layer_diff)
+        )
+        raise ApplyError(msg)
+
     target_anchor = _find_by_reference(target_pcb, anchor_ref)
     if target_anchor is None:
         msg = f"anchor footprint '{anchor_ref}' not found in target PCB {target_pcb.path}"
@@ -259,6 +300,13 @@ def plan_apply(
         net_map=net_map,
     )
 
+    zones, graphics, excluded_zones, excluded_graphics = _plan_zones_and_graphics(
+        source_pcb=source_pcb,
+        in_block_footprints=source_block,
+        transform=transform,
+        net_map=net_map,
+    )
+
     return ApplyPlan(
         sheet=str(sheet),
         source_anchor_ref=source_anchor.reference,
@@ -272,10 +320,20 @@ def plan_apply(
         vias=tuple(vias),
         excluded_tracks=tuple(excluded_tracks),
         excluded_vias=tuple(excluded_vias),
+        zones=tuple(zones),
+        graphics=tuple(graphics),
+        excluded_zones=tuple(excluded_zones),
+        excluded_graphics=tuple(excluded_graphics),
+        layer_mismatch=tuple(layer_diff),
     )
 
 
 _PAD_TOLERANCE_MM = 1e-3  # 1 micrometre — well below pad-pitch noise; KiCAD writes nm-precise.
+
+# Pads sit at footprint reference points; silk/courtyard/zones typically extend
+# a few mm beyond the outermost pad. Pad the in-block bounding box by this much
+# so the hull-containment check catches a typical block's surrounding art.
+_HULL_MARGIN_MM = 5.0
 
 
 def _plan_routing(
@@ -335,6 +393,112 @@ def _plan_routing(
             excluded_vias.append(via)
 
     return tracks, vias, excluded_tracks, excluded_vias
+
+
+def _plan_zones_and_graphics(
+    *,
+    source_pcb: Pcb,
+    in_block_footprints: list[Footprint],
+    transform: Transform,
+    net_map: NetMap,
+) -> tuple[list[ZonePlacement], list[GraphicPlacement], list[ZoneItem], list[GraphicItem]]:
+    """Filter zones and graphics by hull-containment; transform what's kept.
+
+    The hull is the axis-aligned bounding box of in-block footprint pad
+    positions, padded by :data:`_HULL_MARGIN_MM` so the surrounding silk and
+    courtyard art that typical blocks carry is captured. An item is kept iff
+    *all* of its coordinate points fall inside the padded hull.
+    """
+    in_block_pad_positions = _absolute_pad_positions(in_block_footprints)
+    hull = _hull_aabb(in_block_pad_positions, _HULL_MARGIN_MM)
+
+    zones: list[ZonePlacement] = []
+    excluded_zones: list[ZoneItem] = []
+    for zone in source_pcb.zones:
+        if not zone.outline_points:
+            # Defensive: keepouts/zones without any outline can't be placed.
+            excluded_zones.append(zone)
+            continue
+        if not _all_inside(zone.outline_points, hull):
+            excluded_zones.append(zone)
+            continue
+        target_net_name = net_map.lookup(zone.net_name) if zone.net_name else ""
+        zones.append(
+            ZonePlacement(
+                source_raw=zone.raw,
+                transform=transform,
+                net_name=target_net_name,
+                layers=zone.layers,
+            )
+        )
+
+    graphics: list[GraphicPlacement] = []
+    excluded_graphics: list[GraphicItem] = []
+    for graphic in source_pcb.graphics:
+        if not graphic.points:
+            excluded_graphics.append(graphic)
+            continue
+        if not _all_inside(graphic.points, hull):
+            excluded_graphics.append(graphic)
+            continue
+        graphics.append(
+            GraphicPlacement(
+                source_raw=graphic.raw,
+                transform=transform,
+                layer=graphic.layer,
+            )
+        )
+
+    return zones, graphics, excluded_zones, excluded_graphics
+
+
+def _hull_aabb(
+    positions: list[tuple[float, float]], margin: float
+) -> tuple[float, float, float, float] | None:
+    """Return ``(min_x, min_y, max_x, max_y)`` padded by ``margin``; ``None`` if empty."""
+    if not positions:
+        return None
+    xs = [x for x, _ in positions]
+    ys = [y for _, y in positions]
+    return (min(xs) - margin, min(ys) - margin, max(xs) + margin, max(ys) + margin)
+
+
+def _all_inside(
+    points: tuple[tuple[float, float], ...],
+    hull: tuple[float, float, float, float] | None,
+) -> bool:
+    """Return ``True`` if every point is inside the padded AABB. Empty hull → ``False``."""
+    if hull is None:
+        return False
+    min_x, min_y, max_x, max_y = hull
+    return all(min_x <= x <= max_x and min_y <= y <= max_y for x, y in points)
+
+
+def _diff_layer_stackup(
+    source_layers: tuple[LayerInfo, ...],
+    target_layers: tuple[LayerInfo, ...],
+) -> list[str]:
+    """Return a human-readable diff between two layer stackups.
+
+    Empty list means the stackups match exactly (same layers in the same
+    order, same types). The diff lists missing-in-target and missing-in-source
+    layers; ordering changes show up as both.
+    """
+    if source_layers == target_layers:
+        return []
+    diff: list[str] = []
+    source_names = {layer.name for layer in source_layers}
+    target_names = {layer.name for layer in target_layers}
+    for layer in source_layers:
+        if layer.name not in target_names:
+            diff.append(f"- {layer.name} ({layer.type}) present in source, missing in target")
+    for layer in target_layers:
+        if layer.name not in source_names:
+            diff.append(f"- {layer.name} ({layer.type}) present in target, missing in source")
+    if not diff:
+        # Same names but different types or ordering — surface a generic note.
+        diff.append("- layer order or types differ between source and target")
+    return diff
 
 
 def _absolute_pad_positions(footprints: list[Footprint]) -> list[tuple[float, float]]:

@@ -114,6 +114,18 @@ def format_apply_plan(plan: ApplyPlan, *, dry_run: bool) -> str:
                 f"({v.position[0]:.3f}, {v.position[1]:.3f}) "
                 f"size={v.size:g} drill={v.drill:g}"
             )
+    if plan.zones:
+        verb = "zones (to append)" if dry_run else "zones (appended)"
+        lines.append(f"  {verb}:")
+        for z in plan.zones:
+            layer_span = "/".join(z.layers) if z.layers else "(no layers)"
+            net = z.net_name or "(unconnected)"
+            lines.append(f"    {net:<10} {layer_span}")
+    if plan.graphics:
+        verb = "graphics (to append)" if dry_run else "graphics (appended)"
+        lines.append(f"  {verb}:")
+        for g in plan.graphics:
+            lines.append(f"    {g.layer}")
     if plan.excluded_tracks:
         lines.append("  warning: tracks not copied (endpoint outside the block):")
         for t in plan.excluded_tracks:
@@ -125,6 +137,20 @@ def format_apply_plan(plan: ApplyPlan, *, dry_run: bool) -> str:
         lines.append("  warning: vias not copied (position outside the block):")
         for v in plan.excluded_vias:
             lines.append(f"    - {v.net:<10} ({v.position[0]:.3f}, {v.position[1]:.3f})")
+    if plan.excluded_zones:
+        lines.append("  warning: zones not copied (outline outside the block hull):")
+        for z in plan.excluded_zones:
+            net = z.net_name or "(unconnected)"
+            layer_span = "/".join(z.layers) if z.layers else "(no layers)"
+            lines.append(f"    - {net:<10} {layer_span}")
+    if plan.excluded_graphics:
+        lines.append("  warning: graphics not copied (outside the block hull):")
+        for g in plan.excluded_graphics:
+            lines.append(f"    - {g.layer}")
+    if plan.layer_mismatch:
+        lines.append("  warning: layer stackup differs (allow_layer_mismatch override in effect):")
+        for note in plan.layer_mismatch:
+            lines.append(f"    {note}")
     if plan.unmatched_source:
         lines.append("  warning: source footprints with no target counterpart:")
         for sym in plan.unmatched_source:

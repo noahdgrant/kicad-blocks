@@ -60,6 +60,11 @@ class BlockSpec:
             ``[blocks.<name>.net_map]``. Empty by default; ``net_map.build``
             auto-matches identical names, and overrides cover names that
             diverge between projects.
+        allow_layer_mismatch: When ``True``, ``reuse`` proceeds even if the
+            source and target PCBs have differing layer stackups. The diff
+            surfaces as a plan warning instead of an error. Default is
+            ``False`` — mismatched stackups refuse the apply because copper
+            on a layer the target doesn't ship is silently lost.
     """
 
     name: str
@@ -67,6 +72,7 @@ class BlockSpec:
     source: Path | None = None
     anchor: str | None = None
     net_map: dict[str, str] = field(default_factory=_empty_str_map)
+    allow_layer_mismatch: bool = False
 
 
 def _empty_blocks() -> dict[str, BlockSpec]:
@@ -285,12 +291,28 @@ def _validate(path: Path, raw: str, data: dict[str, Any]) -> Config:
                     continue
                 net_map = {k: v for k, v in net_map_dict.items() if isinstance(v, str)}
 
+            allow_mismatch_raw: object = block_dict.get("allow_layer_mismatch")
+            allow_layer_mismatch: bool = False
+            if allow_mismatch_raw is not None:
+                if not isinstance(allow_mismatch_raw, bool):
+                    errors.append(
+                        ConfigError(
+                            path=path,
+                            message=(f"'{key_path}.allow_layer_mismatch' must be a boolean"),
+                            line=_find_section_line(raw, key_path),
+                            key_path=f"{key_path}.allow_layer_mismatch",
+                        )
+                    )
+                    continue
+                allow_layer_mismatch = allow_mismatch_raw
+
             blocks[name] = BlockSpec(
                 name=name,
                 sheet=Path(sheet),
                 source=source,
                 anchor=anchor,
                 net_map=net_map,
+                allow_layer_mismatch=allow_layer_mismatch,
             )
 
     if errors:

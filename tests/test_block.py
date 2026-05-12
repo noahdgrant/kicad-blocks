@@ -315,3 +315,116 @@ def test_plan_apply_reports_unmatched_source_footprints(tmp_path: Path) -> None:
         anchor_ref="ANCHOR1",
     )
     assert "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" in plan.unmatched_source
+
+
+def test_plan_apply_extracts_in_block_zone_and_preserves_net_and_layer() -> None:
+    """A zone whose outline lies inside the in-block footprint hull is carried over."""
+    source = load_pcb(SOURCE_PCB)
+    target = load_pcb(TARGET_PCB)
+
+    plan = plan_apply(
+        source_pcb=source,
+        target_pcb=target,
+        sheet="sheets/mcu.kicad_sch",
+        anchor_ref="ANCHOR1",
+    )
+
+    assert len(plan.zones) == 1
+    zone = plan.zones[0]
+    assert zone.net_name == "GND"
+    assert zone.layers == ("F.Cu",)
+
+
+def test_plan_apply_excludes_out_of_block_zone() -> None:
+    """A zone whose outline lies outside the hull is reported under ``excluded_zones``."""
+    source = load_pcb(SOURCE_PCB)
+    target = load_pcb(TARGET_PCB)
+
+    plan = plan_apply(
+        source_pcb=source,
+        target_pcb=target,
+        sheet="sheets/mcu.kicad_sch",
+        anchor_ref="ANCHOR1",
+    )
+
+    assert len(plan.excluded_zones) == 1
+    # Empty-net zone outside the hull.
+    assert plan.excluded_zones[0].net_name == ""
+
+
+def test_plan_apply_carries_in_block_graphic() -> None:
+    """Board-level graphics inside the hull travel with the block."""
+    source = load_pcb(SOURCE_PCB)
+    target = load_pcb(TARGET_PCB)
+
+    plan = plan_apply(
+        source_pcb=source,
+        target_pcb=target,
+        sheet="sheets/mcu.kicad_sch",
+        anchor_ref="ANCHOR1",
+    )
+
+    layers = {g.layer for g in plan.graphics}
+    assert "F.SilkS" in layers
+    # Two in-block graphics: the gr_text "MCU" and the gr_line.
+    assert len(plan.graphics) == 2
+
+
+def test_plan_apply_excludes_out_of_hull_graphic() -> None:
+    """A board-level graphic outside the hull is reported under ``excluded_graphics``."""
+    source = load_pcb(SOURCE_PCB)
+    target = load_pcb(TARGET_PCB)
+
+    plan = plan_apply(
+        source_pcb=source,
+        target_pcb=target,
+        sheet="sheets/mcu.kicad_sch",
+        anchor_ref="ANCHOR1",
+    )
+
+    # The "OUT" gr_text at (50, 50) is the only excluded graphic.
+    assert len(plan.excluded_graphics) == 1
+    assert (50.0, 50.0) in plan.excluded_graphics[0].points
+
+
+def test_plan_apply_refuses_layer_stackup_mismatch(tmp_path: Path) -> None:
+    """A source/target stackup diff raises ``ApplyError`` with a clear diff."""
+    target_text = TARGET_PCB.read_text()
+    # Strip the last user layer (Eco2.User) to force a stackup difference.
+    bad_text = target_text.replace('    (43 "Eco2.User" user)\n', "")
+    bad_target = tmp_path / "target.kicad_pcb"
+    bad_target.write_text(bad_text)
+
+    source = load_pcb(SOURCE_PCB)
+    target = load_pcb(bad_target)
+
+    with pytest.raises(ApplyError, match="layer stackup"):
+        plan_apply(
+            source_pcb=source,
+            target_pcb=target,
+            sheet="sheets/mcu.kicad_sch",
+            anchor_ref="ANCHOR1",
+        )
+
+
+def test_plan_apply_layer_mismatch_override_proceeds(tmp_path: Path) -> None:
+    """``allow_layer_mismatch=True`` lets the plan proceed despite a stackup diff."""
+    target_text = TARGET_PCB.read_text()
+    bad_text = target_text.replace('    (43 "Eco2.User" user)\n', "")
+    bad_target = tmp_path / "target.kicad_pcb"
+    bad_target.write_text(bad_text)
+
+    source = load_pcb(SOURCE_PCB)
+    target = load_pcb(bad_target)
+
+    plan = plan_apply(
+        source_pcb=source,
+        target_pcb=target,
+        sheet="sheets/mcu.kicad_sch",
+        anchor_ref="ANCHOR1",
+        allow_layer_mismatch=True,
+    )
+
+    # Plan still gets built; the layer_mismatch field flags the override.
+    assert plan.layer_mismatch
+    assert any("Eco2.User" in line for line in plan.layer_mismatch)
