@@ -74,7 +74,8 @@ def format_apply_plan(plan: ApplyPlan, *, dry_run: bool) -> str:
 
     Used by ``reuse --dry-run`` to show what would change, and by the apply
     path to log what was just written. The format is intentionally close to a
-    code-review diff: anchor identification, then a per-footprint table.
+    code-review diff: anchor identification, then a per-footprint table, then
+    tracks/vias, then warnings.
     """
     lines: list[str] = []
     header = "plan" if dry_run else "applied"
@@ -94,6 +95,36 @@ def format_apply_plan(plan: ApplyPlan, *, dry_run: bool) -> str:
             )
     else:
         lines.append("  (no footprints to move)")
+    if plan.tracks:
+        verb = "tracks (to append)" if dry_run else "tracks (appended)"
+        lines.append(f"  {verb}:")
+        for t in plan.tracks:
+            lines.append(
+                f"    {t.net_name:<10} {t.layer:<6} "
+                f"({t.start[0]:.3f}, {t.start[1]:.3f}) → "
+                f"({t.end[0]:.3f}, {t.end[1]:.3f}) w={t.width:g}"
+            )
+    if plan.vias:
+        verb = "vias (to append)" if dry_run else "vias (appended)"
+        lines.append(f"  {verb}:")
+        for v in plan.vias:
+            layer_span = "/".join(v.layers)
+            lines.append(
+                f"    {v.net_name:<10} {layer_span:<14} "
+                f"({v.position[0]:.3f}, {v.position[1]:.3f}) "
+                f"size={v.size:g} drill={v.drill:g}"
+            )
+    if plan.excluded_tracks:
+        lines.append("  warning: tracks not copied (endpoint outside the block):")
+        for t in plan.excluded_tracks:
+            lines.append(
+                f"    - {t.net:<10} ({t.start[0]:.3f}, {t.start[1]:.3f}) → "
+                f"({t.end[0]:.3f}, {t.end[1]:.3f})"
+            )
+    if plan.excluded_vias:
+        lines.append("  warning: vias not copied (position outside the block):")
+        for v in plan.excluded_vias:
+            lines.append(f"    - {v.net:<10} ({v.position[0]:.3f}, {v.position[1]:.3f})")
     if plan.unmatched_source:
         lines.append("  warning: source footprints with no target counterpart:")
         for sym in plan.unmatched_source:

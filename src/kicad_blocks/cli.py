@@ -175,10 +175,12 @@ def reuse(config_path: Path, dry_run: bool) -> None:
         raise SystemExit(1)
 
     all_placements = [p.placement for _, plan in plans for p in plan.placements]
-    if not all_placements:
+    all_tracks = [t for _, plan in plans for t in plan.tracks]
+    all_vias = [v for _, plan in plans for v in plan.vias]
+    if not all_placements and not all_tracks and not all_vias:
         return
     try:
-        apply_placements(target_path, all_placements)
+        apply_placements(target_path, all_placements, tracks=all_tracks, vias=all_vias)
     except KicadIoError as exc:
         click.echo(f"error: {exc}")
         raise SystemExit(1) from None

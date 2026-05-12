@@ -136,6 +136,46 @@ def test_reuse_apply_refuses_with_unresolved_nets(tmp_path: Path) -> None:
     assert target_path.read_bytes() == original
 
 
+def test_reuse_dry_run_reports_tracks_and_excluded_routing(tmp_path: Path) -> None:
+    """Dry-run output names the kept tracks/vias and the excluded boundary-crossing items."""
+    config_path, _ = _stage_target_project(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(main, ["reuse", "--config", str(config_path), "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    # Kept routing surfaced.
+    assert "tracks (to append)" in result.output
+    assert "vias (to append)" in result.output
+    # Boundary-crossing items reported.
+    assert "tracks not copied" in result.output
+    assert "vias not copied" in result.output
+
+
+def test_reuse_apply_writes_tracks_and_vias(tmp_path: Path) -> None:
+    """``reuse`` (no --dry-run) appends transformed source tracks/vias to the target."""
+    config_path, target_path = _stage_target_project(tmp_path)
+    before = load_pcb(target_path)
+    assert before.tracks == ()
+    assert before.vias == ()
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["reuse", "--config", str(config_path)])
+    assert result.exit_code == 0, result.output
+
+    after = load_pcb(target_path)
+    # Two in-block source segments → two tracks at transformed coordinates.
+    assert len(after.tracks) == 2
+    sig_tracks = [t for t in after.tracks if t.net == "SIG"]
+    assert len(sig_tracks) == 1
+    sig = sig_tracks[0]
+    assert sig.start == (210.0, 195.75)
+    assert sig.end == (199.05, 200.0)
+    # One in-block via.
+    assert len(after.vias) == 1
+    assert after.vias[0].net == "SIG"
+    assert after.vias[0].position == (210.0, 195.75)
+
+
 def test_reuse_apply_succeeds_with_net_map_overrides(tmp_path: Path) -> None:
     """Declaring the override under ``[blocks.mcu.net_map]`` lets the apply proceed."""
     config_path, target_path = _stage_target_project(tmp_path)
