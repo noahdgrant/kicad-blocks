@@ -9,6 +9,8 @@ import pytest
 from kicad_blocks.kicad_io import (
     FootprintPlacement,
     KicadIoError,
+    TrackPlacement,
+    ViaPlacement,
     apply_placements,
     load_pcb,
 )
@@ -132,6 +134,86 @@ def test_apply_placements_rolls_back_on_write_failure(
     assert dst.read_bytes() == original
     leftovers = [p.name for p in tmp_path.iterdir() if p.name != "target.kicad_pcb"]
     assert leftovers == []
+
+
+def test_load_pcb_returns_tracks_with_net_names() -> None:
+    """Track segments are exposed as typed :class:`Track` with net *names*, not numbers."""
+    pcb = load_pcb(Path(__file__).parent / "fixtures" / "reuse" / "source" / "source.kicad_pcb")
+    by_endpoints = {(t.start, t.end): t for t in pcb.tracks}
+    in_block = by_endpoints[((100.75, 50.0), (105.0, 60.95))]
+    assert in_block.layer == "F.Cu"
+    assert in_block.width == 0.25
+    assert in_block.net == "SIG"
+
+
+def test_load_pcb_returns_vias_with_layer_span_and_net() -> None:
+    """Vias carry their position, drill, diameter, layer span (resolved to names), and net."""
+    pcb = load_pcb(Path(__file__).parent / "fixtures" / "reuse" / "source" / "source.kicad_pcb")
+    by_position = {v.position: v for v in pcb.vias}
+    sig_via = by_position[(100.75, 50.0)]
+    assert sig_via.drill == 0.3
+    assert sig_via.size == 0.6
+    assert sig_via.layers == ("F.Cu", "B.Cu")
+    assert sig_via.net == "SIG"
+
+
+def test_apply_placements_appends_tracks_and_vias(tmp_path: Path) -> None:
+    """``apply_placements`` accepts ``tracks`` and ``vias`` and appends them atomically."""
+    dst = tmp_path / "target.kicad_pcb"
+    shutil.copy(REUSE_TARGET, dst)
+
+    apply_placements(
+        dst,
+        [],
+        tracks=[
+            TrackPlacement(
+                start=(210.0, 195.75),
+                end=(199.05, 200.0),
+                width=0.25,
+                layer="F.Cu",
+                net_name="SIG",
+            )
+        ],
+        vias=[
+            ViaPlacement(
+                position=(210.0, 195.75),
+                size=0.6,
+                drill=0.3,
+                layers=("F.Cu", "B.Cu"),
+                net_name="SIG",
+            )
+        ],
+    )
+
+    after = load_pcb(dst)
+    assert any(t.start == (210.0, 195.75) and t.net == "SIG" for t in after.tracks)
+    assert any(v.position == (210.0, 195.75) and v.net == "SIG" for v in after.vias)
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name != "target.kicad_pcb"]
+    assert leftovers == []
+
+
+def test_apply_placements_rejects_unknown_net(tmp_path: Path) -> None:
+    """Track/via net names absent from the target board's net table are rejected up front."""
+    dst = tmp_path / "target.kicad_pcb"
+    shutil.copy(REUSE_TARGET, dst)
+    original = dst.read_bytes()
+
+    with pytest.raises(KicadIoError, match="net"):
+        apply_placements(
+            dst,
+            [],
+            tracks=[
+                TrackPlacement(
+                    start=(0.0, 0.0),
+                    end=(1.0, 1.0),
+                    width=0.25,
+                    layer="F.Cu",
+                    net_name="MYSTERY",
+                )
+            ],
+        )
+
+    assert dst.read_bytes() == original
 
 
 def test_apply_placements_rejects_unknown_symbol(tmp_path: Path) -> None:

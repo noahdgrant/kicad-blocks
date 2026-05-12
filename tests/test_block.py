@@ -188,6 +188,109 @@ def test_plan_apply_resolves_renamed_nets_via_overrides(tmp_path: Path) -> None:
     assert plan.net_map.lookup("GND") == "GND"
 
 
+def test_plan_apply_extracts_in_block_tracks() -> None:
+    """Tracks whose endpoints land on in-block footprint pads are planned at target coords."""
+    source = load_pcb(SOURCE_PCB)
+    target = load_pcb(TARGET_PCB)
+
+    plan = plan_apply(
+        source_pcb=source,
+        target_pcb=target,
+        sheet="sheets/mcu.kicad_sch",
+        anchor_ref="ANCHOR1",
+    )
+
+    # Two of the three source segments are fully in-block (SIG: R1↔U1, +3V3: R1↔U1);
+    # the third (C1↔R1) crosses the boundary and must be excluded.
+    assert len(plan.tracks) == 2
+    sig_track = next(t for t in plan.tracks if t.net_name == "SIG")
+    # Source SIG segment runs (100.75, 50) → (105, 60.95). With the 90° rotation
+    # around U1 at source (105, 60) → target (200, 200, 90°): (sx, sy) maps to
+    # (260 - sy, 95 + sx).
+    assert math.isclose(sig_track.start[0], 210.0, abs_tol=1e-6)
+    assert math.isclose(sig_track.start[1], 195.75, abs_tol=1e-6)
+    assert math.isclose(sig_track.end[0], 199.05, abs_tol=1e-6)
+    assert math.isclose(sig_track.end[1], 200.0, abs_tol=1e-6)
+    assert sig_track.layer == "F.Cu"
+
+
+def test_plan_apply_excludes_boundary_crossing_tracks() -> None:
+    """A track with one endpoint outside the block is reported, not silently dropped."""
+    source = load_pcb(SOURCE_PCB)
+    target = load_pcb(TARGET_PCB)
+
+    plan = plan_apply(
+        source_pcb=source,
+        target_pcb=target,
+        sheet="sheets/mcu.kicad_sch",
+        anchor_ref="ANCHOR1",
+    )
+
+    # The C1↔R1 segment (one endpoint outside the block) must be on the
+    # excluded list so dry-run can surface it. Identify by start position.
+    excluded_endpoints = {(t.start, t.end) for t in plan.excluded_tracks}
+    assert ((49.25, 50.0), (99.25, 50.0)) in excluded_endpoints
+
+
+def test_plan_apply_extracts_in_block_vias_with_layer_span() -> None:
+    """A via on an in-block pad keeps its layer span and gets its position rotated."""
+    source = load_pcb(SOURCE_PCB)
+    target = load_pcb(TARGET_PCB)
+
+    plan = plan_apply(
+        source_pcb=source,
+        target_pcb=target,
+        sheet="sheets/mcu.kicad_sch",
+        anchor_ref="ANCHOR1",
+    )
+
+    assert len(plan.vias) == 1
+    via = plan.vias[0]
+    assert via.layers == ("F.Cu", "B.Cu")
+    assert via.net_name == "SIG"
+    assert math.isclose(via.position[0], 210.0, abs_tol=1e-6)
+    assert math.isclose(via.position[1], 195.75, abs_tol=1e-6)
+
+
+def test_plan_apply_excludes_out_of_block_vias() -> None:
+    """A via that lands on an out-of-block pad is excluded and surfaced for dry-run."""
+    source = load_pcb(SOURCE_PCB)
+    target = load_pcb(TARGET_PCB)
+
+    plan = plan_apply(
+        source_pcb=source,
+        target_pcb=target,
+        sheet="sheets/mcu.kicad_sch",
+        anchor_ref="ANCHOR1",
+    )
+
+    excluded_positions = {v.position for v in plan.excluded_vias}
+    assert (49.25, 50.0) in excluded_positions
+
+
+def test_plan_apply_rewrites_track_nets_via_overrides(tmp_path: Path) -> None:
+    """A renamed in-block net flows through to the planned track's ``net_name``."""
+    target_text = TARGET_PCB.read_text().replace('"SIG"', '"SIG_T"')
+    renamed_target = tmp_path / "target.kicad_pcb"
+    renamed_target.write_text(target_text)
+
+    source = load_pcb(SOURCE_PCB)
+    target = load_pcb(renamed_target)
+
+    plan = plan_apply(
+        source_pcb=source,
+        target_pcb=target,
+        sheet="sheets/mcu.kicad_sch",
+        anchor_ref="ANCHOR1",
+        net_overrides={"SIG": "SIG_T"},
+    )
+
+    sig_tracks = [t for t in plan.tracks if t.net_name == "SIG_T"]
+    assert sig_tracks
+    sig_vias = [v for v in plan.vias if v.net_name == "SIG_T"]
+    assert sig_vias
+
+
 def test_plan_apply_reports_unmatched_source_footprints(tmp_path: Path) -> None:
     """Source footprints with no symbol-UUID match in the target are reported."""
     # Build a target that drops the R20 footprint (so source R2's symbol has no

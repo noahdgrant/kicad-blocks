@@ -6,22 +6,33 @@ Two halves live here:
   path, return the footprints whose ``Sheetfile`` matches.
 - The write-path planner (``plan_apply``) — given a source PCB, a target PCB,
   a sheet, and the target's anchor refdes, return a structured
-  :class:`ApplyPlan` that says exactly which target footprints get moved where.
+  :class:`ApplyPlan` that says exactly which target footprints get moved where
+  and which in-block tracks/vias get appended to the target.
 
-Slice 3 was footprint-only with a stub net check; Slice 4 replaces the stub
-with the real ``net_map`` module: auto-match by name, explicit per-block
-overrides, and an ``unresolved_nets`` list carried on the plan. The CLI uses
-that list to refuse the actual apply and to surface the diff in ``--dry-run``.
-Tracks, vias, zones, and silkscreen still arrive in later slices.
+Slice 3 was footprint-only with a stub net check; Slice 4 added the real
+``net_map`` module. Slice 5 carries tracks and vias through the same pipeline:
+items with both endpoints landing on in-block footprint pads are transformed
+into the target frame and surfaced on the plan, items that cross the boundary
+are reported under ``excluded_*`` so dry-run can show them. Zones and
+silkscreen still arrive in later slices.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kicad_blocks.kicad_io import Footprint, FootprintPlacement, Pcb
+from kicad_blocks.kicad_io import (
+    Footprint,
+    FootprintPlacement,
+    Pcb,
+    Track,
+    TrackPlacement,
+    ViaItem,
+    ViaPlacement,
+)
 from kicad_blocks.net_map import NetMap
 from kicad_blocks.net_map import build as build_net_map
 from kicad_blocks.transform import Transform
@@ -85,6 +96,15 @@ class ApplyPlan:
             entry pointing at an existing target net. Non-empty means the
             actual apply must be refused; ``--dry-run`` still prints the plan
             so the user can see what to fix.
+        tracks: Track segments to append to the target, with endpoints already
+            transformed into the target frame and net names rewritten through
+            ``net_map``. Empty when no in-block tracks were found.
+        vias: Vias to append, same convention as ``tracks``.
+        excluded_tracks: Source-frame tracks whose endpoints don't both land
+            on in-block footprint pads. Surfaced for ``--dry-run`` so the user
+            knows what was left behind.
+        excluded_vias: Source-frame vias whose position doesn't land on an
+            in-block footprint pad.
     """
 
     sheet: str
@@ -95,6 +115,10 @@ class ApplyPlan:
     unmatched_source: tuple[str, ...]
     net_map: NetMap = field(default_factory=_empty_net_map)
     unresolved_nets: tuple[str, ...] = ()
+    tracks: tuple[TrackPlacement, ...] = ()
+    vias: tuple[ViaPlacement, ...] = ()
+    excluded_tracks: tuple[Track, ...] = ()
+    excluded_vias: tuple[ViaItem, ...] = ()
 
 
 def footprints_in_sheet(pcb: Pcb, sheet: str | Path) -> list[Footprint]:
@@ -228,6 +252,13 @@ def plan_apply(
             )
         )
 
+    tracks, vias, excluded_tracks, excluded_vias = _plan_routing(
+        source_pcb=source_pcb,
+        in_block_footprints=source_block,
+        transform=transform,
+        net_map=net_map,
+    )
+
     return ApplyPlan(
         sheet=str(sheet),
         source_anchor_ref=source_anchor.reference,
@@ -237,7 +268,113 @@ def plan_apply(
         unmatched_source=tuple(unmatched),
         net_map=net_map,
         unresolved_nets=tuple(unresolved_nets),
+        tracks=tuple(tracks),
+        vias=tuple(vias),
+        excluded_tracks=tuple(excluded_tracks),
+        excluded_vias=tuple(excluded_vias),
     )
+
+
+_PAD_TOLERANCE_MM = 1e-3  # 1 micrometre — well below pad-pitch noise; KiCAD writes nm-precise.
+
+
+def _plan_routing(
+    *,
+    source_pcb: Pcb,
+    in_block_footprints: list[Footprint],
+    transform: Transform,
+    net_map: NetMap,
+) -> tuple[list[TrackPlacement], list[ViaPlacement], list[Track], list[ViaItem]]:
+    """Split source routing into kept-and-transformed vs. excluded-for-the-report lists.
+
+    The strict-boundary rule: a track is kept iff *both* endpoints land on an
+    in-block footprint pad; a via is kept iff its position lands on an in-block
+    pad. Items where at least one endpoint matches an out-of-block pad are
+    reported as ``excluded_*``. Items unrelated to the block (neither endpoint
+    near any pad we care about) are ignored.
+    """
+    in_block_pad_positions = _absolute_pad_positions(in_block_footprints)
+    out_of_block_footprints = [fp for fp in source_pcb.footprints if fp not in in_block_footprints]
+    out_of_block_pad_positions = _absolute_pad_positions(out_of_block_footprints)
+
+    tracks: list[TrackPlacement] = []
+    excluded_tracks: list[Track] = []
+    for track in source_pcb.tracks:
+        start_in = _is_near_any(track.start, in_block_pad_positions)
+        end_in = _is_near_any(track.end, in_block_pad_positions)
+        start_out = _is_near_any(track.start, out_of_block_pad_positions)
+        end_out = _is_near_any(track.end, out_of_block_pad_positions)
+        if start_in and end_in:
+            tracks.append(
+                TrackPlacement(
+                    start=transform.apply(track.start),
+                    end=transform.apply(track.end),
+                    width=track.width,
+                    layer=track.layer,
+                    net_name=net_map.lookup(track.net),
+                )
+            )
+        elif (start_in or end_in) and (start_out or end_out):
+            # Straddles the boundary — surface so dry-run shows what's not coming with.
+            excluded_tracks.append(track)
+
+    vias: list[ViaPlacement] = []
+    excluded_vias: list[ViaItem] = []
+    for via in source_pcb.vias:
+        if _is_near_any(via.position, in_block_pad_positions):
+            vias.append(
+                ViaPlacement(
+                    position=transform.apply(via.position),
+                    size=via.size,
+                    drill=via.drill,
+                    layers=via.layers,
+                    net_name=net_map.lookup(via.net),
+                )
+            )
+        elif _is_near_any(via.position, out_of_block_pad_positions):
+            excluded_vias.append(via)
+
+    return tracks, vias, excluded_tracks, excluded_vias
+
+
+def _absolute_pad_positions(footprints: list[Footprint]) -> list[tuple[float, float]]:
+    """Return every pad's absolute world position across ``footprints``.
+
+    Pads in the file are stored relative to the footprint origin; we rotate
+    them by the footprint's rotation and add the footprint's position.
+    """
+    positions: list[tuple[float, float]] = []
+    for fp in footprints:
+        cos_r, sin_r = _cos_sin(fp.rotation)
+        fx, fy = fp.position
+        for pad in fp.pads:
+            px, py = pad.position
+            positions.append((fx + cos_r * px - sin_r * py, fy + sin_r * px + cos_r * py))
+    return positions
+
+
+def _cos_sin(angle_deg: float) -> tuple[float, float]:
+    """Return ``(cos, sin)`` for ``angle_deg`` with axis-aligned angles exact."""
+    a = angle_deg % 360.0
+    if a == 0.0:
+        return (1.0, 0.0)
+    if a == 90.0:
+        return (0.0, 1.0)
+    if a == 180.0:
+        return (-1.0, 0.0)
+    if a == 270.0:
+        return (0.0, -1.0)
+    theta = math.radians(a)
+    return (math.cos(theta), math.sin(theta))
+
+
+def _is_near_any(point: tuple[float, float], candidates: list[tuple[float, float]]) -> bool:
+    """Return ``True`` if ``point`` is within :data:`_PAD_TOLERANCE_MM` of any candidate."""
+    px, py = point
+    for cx, cy in candidates:
+        if abs(px - cx) <= _PAD_TOLERANCE_MM and abs(py - cy) <= _PAD_TOLERANCE_MM:
+            return True
+    return False
 
 
 def _collect_block_nets(source_block: list[Footprint]) -> list[str]:
