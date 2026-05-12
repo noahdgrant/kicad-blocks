@@ -169,6 +169,45 @@ def test_block_net_map_wrong_type_reports_error(tmp_path: Path) -> None:
     assert any("net_map" in err.message for err in excinfo.value.errors)
 
 
+def test_block_allow_layer_mismatch_defaults_to_false(tmp_path: Path) -> None:
+    """A block without ``allow_layer_mismatch`` keeps the strict-stackup default."""
+    config_path = tmp_path / "kicad-blocks.toml"
+    config_path.write_text(
+        'project = "x"\nsources = ["a.kicad_pcb"]\n\n[blocks.mcu]\nsheet = "sheets/mcu.kicad_sch"\n'
+    )
+    config = load_config(config_path)
+    assert config.blocks["mcu"].allow_layer_mismatch is False
+
+
+def test_block_allow_layer_mismatch_parses_true(tmp_path: Path) -> None:
+    """``allow_layer_mismatch = true`` flows into the BlockSpec."""
+    config_path = tmp_path / "kicad-blocks.toml"
+    config_path.write_text(
+        'project = "x"\n'
+        'sources = ["a.kicad_pcb"]\n'
+        "\n[blocks.mcu]\n"
+        'sheet = "sheets/mcu.kicad_sch"\n'
+        "allow_layer_mismatch = true\n"
+    )
+    config = load_config(config_path)
+    assert config.blocks["mcu"].allow_layer_mismatch is True
+
+
+def test_block_allow_layer_mismatch_wrong_type_reports_error(tmp_path: Path) -> None:
+    """``allow_layer_mismatch`` must be a boolean."""
+    bad = tmp_path / "kicad-blocks.toml"
+    bad.write_text(
+        'project = "x"\n'
+        'sources = ["a.kicad_pcb"]\n'
+        "\n[blocks.mcu]\n"
+        'sheet = "sheets/mcu.kicad_sch"\n'
+        'allow_layer_mismatch = "yes"\n'
+    )
+    with pytest.raises(InvalidConfigError) as excinfo:
+        load_config(bad)
+    assert any("allow_layer_mismatch" in err.message for err in excinfo.value.errors)
+
+
 def test_block_net_map_non_string_values_report_error(tmp_path: Path) -> None:
     """Each entry in ``net_map`` must be a string-to-string pair."""
     bad = tmp_path / "kicad-blocks.toml"

@@ -8,15 +8,19 @@ import pytest
 
 from kicad_blocks.kicad_io import (
     FootprintPlacement,
+    GraphicPlacement,
     KicadIoError,
     TrackPlacement,
     ViaPlacement,
+    ZonePlacement,
     apply_placements,
     load_pcb,
 )
+from kicad_blocks.transform import Transform
 
 FIXTURE = Path(__file__).parent / "fixtures" / "minimal" / "minimal.kicad_pcb"
 REUSE_TARGET = Path(__file__).parent / "fixtures" / "reuse" / "target" / "target.kicad_pcb"
+REUSE_SOURCE = Path(__file__).parent / "fixtures" / "reuse" / "source" / "source.kicad_pcb"
 
 
 def test_load_pcb_returns_typed_footprints() -> None:
@@ -214,6 +218,96 @@ def test_apply_placements_rejects_unknown_net(tmp_path: Path) -> None:
         )
 
     assert dst.read_bytes() == original
+
+
+def test_load_pcb_exposes_layer_stackup() -> None:
+    """``Pcb.layers`` carries the board's layer table in source order."""
+    pcb = load_pcb(REUSE_SOURCE)
+    names = [layer.name for layer in pcb.layers]
+    assert "F.Cu" in names
+    assert "B.Cu" in names
+    assert "F.SilkS" in names
+    # Each layer carries a type alongside its name.
+    f_cu = next(layer for layer in pcb.layers if layer.name == "F.Cu")
+    assert f_cu.type == "signal"
+
+
+def test_load_pcb_exposes_board_zones() -> None:
+    """``Pcb.zones`` enumerates zones with net name, layers, and outline points."""
+    pcb = load_pcb(REUSE_SOURCE)
+    by_net = {z.net_name: z for z in pcb.zones}
+    assert "GND" in by_net
+    gnd_zone = by_net["GND"]
+    assert gnd_zone.layers == ("F.Cu",)
+    # The four polygon corners of the in-block zone.
+    assert (98.0, 48.0) in gnd_zone.outline_points
+    assert (112.0, 62.0) in gnd_zone.outline_points
+
+
+def test_load_pcb_exposes_board_graphics() -> None:
+    """``Pcb.graphics`` enumerates board-level gr_* items with layer and points."""
+    pcb = load_pcb(REUSE_SOURCE)
+    text_items = [g for g in pcb.graphics if any(p == (105.0, 55.0) for p in g.points)]
+    assert text_items, "expected a graphic at the in-block 'MCU' label position"
+    assert text_items[0].layer == "F.SilkS"
+
+
+def test_apply_placements_appends_zones_with_resolved_net(tmp_path: Path) -> None:
+    """``apply_placements`` deep-copies the source zone and writes it with the resolved net."""
+    src = REUSE_SOURCE
+    dst = tmp_path / "target.kicad_pcb"
+    shutil.copy(REUSE_TARGET, dst)
+
+    source_pcb = load_pcb(src)
+    gnd_zone = next(z for z in source_pcb.zones if z.net_name == "GND")
+
+    apply_placements(
+        dst,
+        [],
+        zones=[
+            ZonePlacement(
+                source_raw=gnd_zone.raw,
+                transform=Transform.identity(),
+                net_name="GND",
+                layers=("F.Cu",),
+            )
+        ],
+    )
+
+    after_text = dst.read_text()
+    assert '(net_name "GND")' in after_text
+    # The outline polygon was preserved.
+    assert "98" in after_text and "112" in after_text
+
+
+def test_apply_placements_transforms_graphic_endpoints(tmp_path: Path) -> None:
+    """``apply_placements`` deep-copies a source graphic and rewrites its coordinates."""
+    src = REUSE_SOURCE
+    dst = tmp_path / "target.kicad_pcb"
+    shutil.copy(REUSE_TARGET, dst)
+
+    source_pcb = load_pcb(src)
+    in_block_line = next(
+        g for g in source_pcb.graphics if (98.0, 48.0) in g.points and (112.0, 48.0) in g.points
+    )
+
+    apply_placements(
+        dst,
+        [],
+        graphics=[
+            GraphicPlacement(
+                source_raw=in_block_line.raw,
+                transform=Transform.translation(10.0, 20.0),
+                layer="F.SilkS",
+            )
+        ],
+    )
+
+    after = load_pcb(dst)
+    # After +10,+20 translation: endpoints (98,48)→(108,68) and (112,48)→(122,68).
+    line = next(g for g in after.graphics if (108.0, 68.0) in g.points)
+    assert (122.0, 68.0) in line.points
+    assert line.layer == "F.SilkS"
 
 
 def test_apply_placements_rejects_unknown_symbol(tmp_path: Path) -> None:
