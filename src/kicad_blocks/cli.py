@@ -6,16 +6,17 @@ hand the result to the reporter. Business logic stays out of this file.
 
 from __future__ import annotations
 
+import math
 from importlib.metadata import version
 from pathlib import Path
 
 import click
 
 from kicad_blocks import block as block_module
-from kicad_blocks.block import ApplyError, ApplyPlan, plan_apply
+from kicad_blocks.block import ApplyError, ApplyPlan, footprints_in_sheet, plan_apply
 from kicad_blocks.config import BlockSpec, Config, InvalidConfigError, load_config
 from kicad_blocks.diff import compute_diff
-from kicad_blocks.kicad_io import Footprint, KicadIoError, apply_placements, load_pcb
+from kicad_blocks.kicad_io import Footprint, KicadIoError, Pcb, apply_placements, load_pcb
 from kicad_blocks.reporter import (
     format_apply_plan,
     format_block_diff,
@@ -30,6 +31,7 @@ from kicad_blocks.sync_state import (
     LockFileError,
     hash_applied_block,
     hash_file,
+    hash_target_block_state,
     lock_path_for,
     read_lock,
     write_lock,
@@ -217,19 +219,23 @@ def reuse(config_path: Path, dry_run: bool) -> None:
     default=False,
     help="Print the diff between the current source and target without writing.",
 )
-def sync(config_path: Path, dry_run: bool) -> None:
-    """Compare the current source layout against the target's block region.
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Skip the confirmation prompt and override hand-edit conflicts.",
+)
+def sync(config_path: Path, dry_run: bool, force: bool) -> None:
+    """Bring the target's block region back in step with the source.
 
-    Slice 7 implements ``--dry-run`` only. The command loads the lock file
-    written by the most recent ``reuse``, computes the structured diff between
-    the source block and the target's current state, and prints a
-    code-review-style report grouped by change type. The actual apply path
-    (with conflict detection and interactive confirmation) lands in slice 8.
+    Without ``--dry-run``: compute the structured diff for each block, refuse
+    to apply if the target's current block-region hash diverges from the
+    lock's ``applied_block_hash`` (unless ``--force``), prompt y/N for
+    confirmation (unless ``--force``), then apply atomically. The lock is
+    refreshed on success.
+
+    With ``--dry-run``: print the diff only.
     """
-    if not dry_run:
-        click.echo("error: 'kicad-blocks sync' without --dry-run is not implemented yet (slice 8)")
-        raise SystemExit(2)
-
     try:
         config = load_config(config_path)
     except InvalidConfigError as exc:
@@ -250,13 +256,16 @@ def sync(config_path: Path, dry_run: bool) -> None:
 
     lock_path = lock_path_for(config.project_dir, config.project)
     try:
-        read_lock(lock_path)
+        lock = read_lock(lock_path)
     except LockFileError as exc:
         click.echo(f"error: {exc}")
         click.echo("hint: run 'kicad-blocks reuse' first to establish a baseline lock file")
         raise SystemExit(1) from None
 
     target_path = _resolve(config, config.target)
+    blocks: list[tuple[BlockSpec, ApplyPlan, Pcb]] = []
+    diffs: list[tuple[BlockSpec, object]] = []
+    conflicts: list[str] = []
     for spec in actionable:
         assert spec.source is not None
         assert spec.anchor is not None
@@ -267,6 +276,7 @@ def sync(config_path: Path, dry_run: bool) -> None:
         except KicadIoError as exc:
             click.echo(f"error: {exc}")
             raise SystemExit(1) from None
+
         diff = compute_diff(
             source_pcb=source_pcb,
             target_pcb=target_pcb,
@@ -274,7 +284,94 @@ def sync(config_path: Path, dry_run: bool) -> None:
             anchor_ref=spec.anchor,
             net_overrides=spec.net_map,
         )
+        diffs.append((spec, diff))
         click.echo(format_block_diff(spec.name, diff))
+
+        if dry_run:
+            continue
+
+        try:
+            plan = plan_apply(
+                source_pcb=source_pcb,
+                target_pcb=target_pcb,
+                sheet=str(spec.sheet),
+                anchor_ref=spec.anchor,
+                net_overrides=spec.net_map,
+                allow_layer_mismatch=spec.allow_layer_mismatch,
+            )
+        except (KicadIoError, ApplyError) as exc:
+            click.echo(f"error: {exc}")
+            raise SystemExit(1) from None
+
+        prior_state = lock.blocks.get(spec.name)
+        if prior_state is not None:
+            current_hash = hash_target_block_state(
+                target_pcb=target_pcb,
+                sheet=str(spec.sheet),
+                anchor_ref=spec.anchor,
+                transform_angle_deg=plan.transform_angle_deg,
+            )
+            if current_hash != prior_state.applied_block_hash:
+                conflicts.append(spec.name)
+
+        blocks.append((spec, plan, target_pcb))
+
+    if dry_run:
+        return
+
+    if conflicts and not force:
+        names = ", ".join(f"'{name}'" for name in conflicts)
+        click.echo(
+            f"error: hand-edits detected in target block region(s): {names} — "
+            f"re-run with --force to overwrite them with the source layout"
+        )
+        raise SystemExit(1)
+
+    if all(_diff_is_empty(d) for _, d in diffs):
+        click.echo("no changes to apply")
+        return
+
+    if any(plan.unresolved_nets for _, plan, _ in blocks):
+        for spec, plan, _ in blocks:
+            if plan.unresolved_nets:
+                click.echo(
+                    f"error: block '{spec.name}' has unresolved net(s) "
+                    f"{list(plan.unresolved_nets)} — declare overrides in "
+                    f"[blocks.{spec.name}.net_map] or rename in the target PCB"
+                )
+        raise SystemExit(1)
+
+    if not force and not click.confirm("apply these changes to the target PCB?", default=False):
+        click.echo("aborted; target left untouched")
+        raise SystemExit(1)
+
+    purge_pad_positions: list[tuple[float, float]] = []
+    for spec, _, target_pcb in blocks:
+        purge_pad_positions.extend(
+            _absolute_pad_positions(footprints_in_sheet(target_pcb, str(spec.sheet)))
+        )
+
+    all_placements = [p.placement for _, plan, _ in blocks for p in plan.placements]
+    all_tracks = [t for _, plan, _ in blocks for t in plan.tracks]
+    all_vias = [v for _, plan, _ in blocks for v in plan.vias]
+    all_zones = [z for _, plan, _ in blocks for z in plan.zones]
+    all_graphics = [g for _, plan, _ in blocks for g in plan.graphics]
+    try:
+        apply_placements(
+            target_path,
+            all_placements,
+            tracks=all_tracks,
+            vias=all_vias,
+            zones=all_zones,
+            graphics=all_graphics,
+            purge_in_block_pad_positions=purge_pad_positions,
+        )
+    except KicadIoError as exc:
+        click.echo(f"error: {exc}")
+        raise SystemExit(1) from None
+
+    _write_lock(config, [(spec, plan) for spec, plan, _ in blocks])
+    click.echo("sync applied; lock updated")
 
 
 def _write_lock(config: Config, plans: list[tuple[BlockSpec, ApplyPlan]]) -> None:
@@ -317,6 +414,34 @@ def _plan_block(config: Config, spec: BlockSpec, target_path: Path) -> ApplyPlan
 def _resolve(config: Config, path: Path) -> Path:
     """Resolve ``path`` against the config's project directory if relative."""
     return path if path.is_absolute() else (config.project_dir / path)
+
+
+def _diff_is_empty(diff: object) -> bool:
+    """Return ``True`` when ``diff`` has no entries in any category."""
+    return bool(getattr(diff, "is_empty", False))
+
+
+def _absolute_pad_positions(footprints: list[Footprint]) -> list[tuple[float, float]]:
+    """Return every pad's absolute world position across ``footprints``."""
+    positions: list[tuple[float, float]] = []
+    for fp in footprints:
+        a = fp.rotation % 360.0
+        if a == 0.0:
+            cos_r, sin_r = 1.0, 0.0
+        elif a == 90.0:
+            cos_r, sin_r = 0.0, 1.0
+        elif a == 180.0:
+            cos_r, sin_r = -1.0, 0.0
+        elif a == 270.0:
+            cos_r, sin_r = 0.0, -1.0
+        else:
+            theta = math.radians(a)
+            cos_r, sin_r = math.cos(theta), math.sin(theta)
+        fx, fy = fp.position
+        for pad in fp.pads:
+            px, py = pad.position
+            positions.append((fx + cos_r * px - sin_r * py, fy + sin_r * px + cos_r * py))
+    return positions
 
 
 if __name__ == "__main__":

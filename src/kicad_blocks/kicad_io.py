@@ -333,13 +333,24 @@ def apply_placements(
     vias: Sequence[ViaPlacement] = (),
     zones: Sequence[ZonePlacement] = (),
     graphics: Sequence[GraphicPlacement] = (),
+    purge_in_block_pad_positions: Sequence[tuple[float, float]] = (),
+    purge_hull_margin_mm: float = 5.0,
 ) -> None:
     """Apply mutations to the PCB at ``path``, atomically.
 
     Footprints in ``placements`` are *moved* (located by symbol UUID and
     overwritten in place). Tracks, vias, zones, and graphics are *appended*
-    to the board — the slice 6 apply does not remove or deduplicate existing
-    items; that arrives with the sync apply (Slice 8).
+    to the board.
+
+    When ``purge_in_block_pad_positions`` is non-empty, in-block routing and
+    art is removed from the board *before* the new items are appended — this is
+    the sync apply's de-dup hook. The pad positions describe the target's
+    current block region (one ``(x, y)`` per in-block footprint pad in board
+    coordinates); any pre-existing track whose endpoints both land near one of
+    these pads (or via at one of them) is removed, and zones/graphics whose
+    every coordinate falls inside the padded AABB of the same pads are removed
+    too. The hull margin (default 5 mm) matches the planner's so silk and
+    courtyard art the original apply pulled in is also cleared.
 
     Zones and graphics carry an opaque reference to the source kiutils item.
     They are deep-copied here, their coordinates transformed by
@@ -362,6 +373,12 @@ def apply_placements(
             transform + a target-side net name.
         graphics: Board-level graphics to append, same convention as zones
             but without a net.
+        purge_in_block_pad_positions: Board-frame pad positions describing the
+            target's current in-block footprint pads. When non-empty,
+            pre-existing in-block tracks/vias/zones/graphics are removed
+            before appending the new items — sync's de-dup hook.
+        purge_hull_margin_mm: Padding (mm) around the in-block pad AABB used
+            to decide which zones/graphics count as "in block" for the purge.
 
     Raises:
         KicadIoError: If the file cannot be read or written, if any footprint
@@ -369,6 +386,13 @@ def apply_placements(
             references a net name absent from the target's net table.
     """
     board = _load_board(path)
+
+    if purge_in_block_pad_positions:
+        _purge_in_block_items(
+            board,
+            list(purge_in_block_pad_positions),
+            margin=purge_hull_margin_mm,
+        )
 
     by_symbol_uuid: dict[str, list[object]] = {}
     for fp in board.footprints:
@@ -411,6 +435,98 @@ def apply_placements(
         board.graphicItems.append(_build_graphic(graphic_placement))
 
     _write_board_atomic(board, path)
+
+
+_PURGE_PAD_TOLERANCE_MM = 1e-3
+
+
+def _purge_in_block_items(
+    board: Board, pad_positions: list[tuple[float, float]], *, margin: float
+) -> None:
+    """Drop in-block tracks/vias/zones/graphics from ``board`` in place.
+
+    Mirrors the inclusion logic used by ``block.plan_apply`` so the items we
+    remove on a sync apply are exactly the same kind we'd otherwise re-append.
+    """
+    hull = _purge_hull(pad_positions, margin)
+
+    kept_traces: list[object] = []
+    for item in board.traceItems:
+        if isinstance(item, Segment):
+            start = (
+                float(getattr(item.start, "X", 0.0) or 0.0),
+                float(getattr(item.start, "Y", 0.0) or 0.0),
+            )
+            end = (
+                float(getattr(item.end, "X", 0.0) or 0.0),
+                float(getattr(item.end, "Y", 0.0) or 0.0),
+            )
+            if _purge_near(start, pad_positions) and _purge_near(end, pad_positions):
+                continue
+        elif isinstance(item, Via):
+            pos = (
+                float(getattr(item.position, "X", 0.0) or 0.0),
+                float(getattr(item.position, "Y", 0.0) or 0.0),
+            )
+            if _purge_near(pos, pad_positions):
+                continue
+        kept_traces.append(item)
+    board.traceItems = kept_traces
+
+    kept_zones: list[object] = []
+    for zone in board.zones:
+        outline_points: list[tuple[float, float]] = []
+        for polygon in getattr(zone, "polygons", []) or []:
+            for p in getattr(polygon, "coordinates", []) or []:
+                outline_points.append(
+                    (
+                        float(getattr(p, "X", 0.0) or 0.0),
+                        float(getattr(p, "Y", 0.0) or 0.0),
+                    )
+                )
+        if outline_points and _all_inside(outline_points, hull):
+            continue
+        kept_zones.append(zone)
+    board.zones = kept_zones
+
+    kept_graphics: list[object] = []
+    for item in board.graphicItems:
+        points = _collect_graphic_points(item)
+        if points and _all_inside(points, hull):
+            continue
+        kept_graphics.append(item)
+    board.graphicItems = kept_graphics
+
+
+def _purge_near(point: tuple[float, float], candidates: list[tuple[float, float]]) -> bool:
+    """Return ``True`` if ``point`` sits on any pad within :data:`_PURGE_PAD_TOLERANCE_MM`."""
+    px, py = point
+    for cx, cy in candidates:
+        if abs(px - cx) <= _PURGE_PAD_TOLERANCE_MM and abs(py - cy) <= _PURGE_PAD_TOLERANCE_MM:
+            return True
+    return False
+
+
+def _purge_hull(
+    pad_positions: list[tuple[float, float]], margin: float
+) -> tuple[float, float, float, float] | None:
+    """Return the padded AABB around ``pad_positions`` (``None`` for empty input)."""
+    if not pad_positions:
+        return None
+    xs = [x for x, _ in pad_positions]
+    ys = [y for _, y in pad_positions]
+    return (min(xs) - margin, min(ys) - margin, max(xs) + margin, max(ys) + margin)
+
+
+def _all_inside(
+    points: list[tuple[float, float]] | tuple[tuple[float, float], ...],
+    hull: tuple[float, float, float, float] | None,
+) -> bool:
+    """Return ``True`` if every point is inside the padded AABB. Empty hull → ``False``."""
+    if hull is None:
+        return False
+    min_x, min_y, max_x, max_y = hull
+    return all(min_x <= x <= max_x and min_y <= y <= max_y for x, y in points)
 
 
 def _load_board(path: Path) -> Board:
