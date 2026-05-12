@@ -1,4 +1,4 @@
-"""Text-mode output for the validate and list-block commands.
+"""Text-mode output for the CLI subcommands.
 
 The reporter is the seam through which CLI commands turn domain values into
 human-readable lines. ``--format json`` lives in a later slice (issue #12); for
@@ -8,6 +8,7 @@ structure so it's easy to plug a renderer in later.
 
 from __future__ import annotations
 
+from kicad_blocks.block import ApplyPlan
 from kicad_blocks.config import ConfigError
 from kicad_blocks.kicad_io import Footprint
 
@@ -66,3 +67,35 @@ def format_footprint_list(footprints: list[Footprint]) -> str:
         uuid = fp.symbol_uuid or "-"
         rows.append(f"{ref:<8} {uuid:<38} {fp.layer:<6} {pos:<22} {fp.rotation:>6.1f}")
     return "\n".join(rows)
+
+
+def format_apply_plan(plan: ApplyPlan, *, dry_run: bool) -> str:
+    """Render an :class:`ApplyPlan` as a human-readable summary.
+
+    Used by ``reuse --dry-run`` to show what would change, and by the apply
+    path to log what was just written. The format is intentionally close to a
+    code-review diff: anchor identification, then a per-footprint table.
+    """
+    lines: list[str] = []
+    header = "plan" if dry_run else "applied"
+    lines.append(
+        f"{header}: block on sheet '{plan.sheet}', anchor "
+        f"{plan.source_anchor_ref} → {plan.target_anchor_ref} "
+        f"(rotation {plan.transform_angle_deg:g}°)"
+    )
+    if plan.placements:
+        lines.append(f"  {'REF':<10} {'UUID':<38} {'FROM':<22} {'TO':<22} {'ROT':>7}")
+        for p in plan.placements:
+            frm = f"({p.source_position[0]:.3f}, {p.source_position[1]:.3f})"
+            to = f"({p.target_position[0]:.3f}, {p.target_position[1]:.3f})"
+            ref = f"{p.source_reference}→{p.target_reference}"
+            lines.append(
+                f"  {ref:<10} {p.symbol_uuid:<38} {frm:<22} {to:<22} {p.target_rotation:>7.1f}"
+            )
+    else:
+        lines.append("  (no footprints to move)")
+    if plan.unmatched_source:
+        lines.append("  warning: source footprints with no target counterpart:")
+        for sym in plan.unmatched_source:
+            lines.append(f"    - {sym}")
+    return "\n".join(lines)

@@ -1,0 +1,8 @@
+project = "reuse-target"
+sources = ["target.kicad_pcb"]
+target = "target.kicad_pcb"
+
+[blocks.mcu]
+sheet = "sheets/mcu.kicad_sch"
+source = "../source/source.kicad_pcb"
+anchor = "ANCHOR1"

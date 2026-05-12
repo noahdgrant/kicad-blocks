@@ -46,10 +46,18 @@ class BlockSpec:
         name: The block's logical name (the table key in ``[blocks.<name>]``).
         sheet: Path to the shared ``.kicad_sch`` file, relative to the
             project directory (i.e. the directory containing the config).
+        source: Optional path to the source PCB whose layout is canonical for
+            this block. Required by ``reuse``; absent for blocks that are
+            being canonically authored in this project.
+        anchor: Optional refdes of the anchor footprint in this project's
+            target PCB. The anchor's position and rotation define the frame
+            into which the block is placed. Required by ``reuse``.
     """
 
     name: str
     sheet: Path
+    source: Path | None = None
+    anchor: str | None = None
 
 
 def _empty_blocks() -> dict[str, BlockSpec]:
@@ -58,12 +66,24 @@ def _empty_blocks() -> dict[str, BlockSpec]:
 
 @dataclass(frozen=True)
 class Config:
-    """A loaded ``kicad-blocks.toml``."""
+    """A loaded ``kicad-blocks.toml``.
+
+    Attributes:
+        config_path: Path to the TOML file we were loaded from.
+        project_dir: Directory containing the config; resolves relative paths.
+        project: Logical project name.
+        sources: PCBs this project is canonical for (read-side commands like
+            ``list-block`` operate on these).
+        target: Optional path to this project's target PCB — the file ``reuse``
+            writes to. Resolved relative to ``project_dir``.
+        blocks: Per-block declarations.
+    """
 
     config_path: Path
     project_dir: Path
     project: str
     sources: tuple[Path, ...]
+    target: Path | None = None
     blocks: dict[str, BlockSpec] = field(default_factory=_empty_blocks)
 
 
@@ -138,6 +158,21 @@ def _validate(path: Path, raw: str, data: dict[str, Any]) -> Config:
         else:
             sources = tuple(Path(s) for s in sources_list if isinstance(s, str))
 
+    target_raw: object = data.get("target")
+    target: Path | None = None
+    if target_raw is not None:
+        if not isinstance(target_raw, str):
+            errors.append(
+                ConfigError(
+                    path=path,
+                    message="'target' must be a string (path to the target PCB)",
+                    line=_find_line(raw, "target"),
+                    key_path="target",
+                )
+            )
+        else:
+            target = Path(target_raw)
+
     blocks: dict[str, BlockSpec] = {}
     blocks_raw: object = data.get("blocks", {})
     if blocks_raw and not isinstance(blocks_raw, dict):
@@ -175,7 +210,38 @@ def _validate(path: Path, raw: str, data: dict[str, Any]) -> Config:
                     )
                 )
                 continue
-            blocks[name] = BlockSpec(name=name, sheet=Path(sheet))
+
+            source_raw: object = block_dict.get("source")
+            source: Path | None = None
+            if source_raw is not None:
+                if not isinstance(source_raw, str):
+                    errors.append(
+                        ConfigError(
+                            path=path,
+                            message=f"'{key_path}.source' must be a string",
+                            line=_find_section_line(raw, key_path),
+                            key_path=key_path,
+                        )
+                    )
+                    continue
+                source = Path(source_raw)
+
+            anchor_raw: object = block_dict.get("anchor")
+            anchor: str | None = None
+            if anchor_raw is not None:
+                if not isinstance(anchor_raw, str):
+                    errors.append(
+                        ConfigError(
+                            path=path,
+                            message=f"'{key_path}.anchor' must be a string (refdes)",
+                            line=_find_section_line(raw, key_path),
+                            key_path=key_path,
+                        )
+                    )
+                    continue
+                anchor = anchor_raw
+
+            blocks[name] = BlockSpec(name=name, sheet=Path(sheet), source=source, anchor=anchor)
 
     if errors:
         raise InvalidConfigError(errors)
@@ -185,6 +251,7 @@ def _validate(path: Path, raw: str, data: dict[str, Any]) -> Config:
         project_dir=path.parent,
         project=project,
         sources=sources,
+        target=target,
         blocks=blocks,
     )
 

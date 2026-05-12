@@ -80,3 +80,49 @@ def test_config_error_is_dataclass_like() -> None:
     assert err.line == 3
     assert err.column == 2
     assert err.key_path == "a.b"
+
+
+def test_block_source_and_anchor_are_optional(tmp_path: Path) -> None:
+    """``source`` and ``anchor`` round-trip when present, default to ``None`` otherwise."""
+    config_path = tmp_path / "kicad-blocks.toml"
+    config_path.write_text(
+        'project = "x"\n'
+        'sources = ["a.kicad_pcb"]\n'
+        'target = "a.kicad_pcb"\n'
+        "\n[blocks.mcu]\n"
+        'sheet = "sheets/mcu.kicad_sch"\n'
+        'source = "../canonical/canonical.kicad_pcb"\n'
+        'anchor = "U7"\n'
+        "\n[blocks.power]\n"
+        'sheet = "sheets/power.kicad_sch"\n'
+    )
+    config = load_config(config_path)
+    assert config.target == Path("a.kicad_pcb")
+    assert config.blocks["mcu"].source == Path("../canonical/canonical.kicad_pcb")
+    assert config.blocks["mcu"].anchor == "U7"
+    assert config.blocks["power"].source is None
+    assert config.blocks["power"].anchor is None
+
+
+def test_target_wrong_type_reports_error(tmp_path: Path) -> None:
+    """``target`` must be a string; non-string values surface a typed error."""
+    bad = tmp_path / "kicad-blocks.toml"
+    bad.write_text('project = "x"\nsources = ["a.kicad_pcb"]\ntarget = 42\n')
+    with pytest.raises(InvalidConfigError) as excinfo:
+        load_config(bad)
+    assert any("target" in err.message for err in excinfo.value.errors)
+
+
+def test_block_anchor_wrong_type_reports_error(tmp_path: Path) -> None:
+    """``anchor`` must be a string."""
+    bad = tmp_path / "kicad-blocks.toml"
+    bad.write_text(
+        'project = "x"\n'
+        'sources = ["a.kicad_pcb"]\n'
+        "\n[blocks.mcu]\n"
+        'sheet = "sheets/mcu.kicad_sch"\n'
+        "anchor = 7\n"
+    )
+    with pytest.raises(InvalidConfigError) as excinfo:
+        load_config(bad)
+    assert any("anchor" in err.message for err in excinfo.value.errors)
