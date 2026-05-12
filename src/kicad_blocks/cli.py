@@ -12,9 +12,11 @@ from pathlib import Path
 import click
 
 from kicad_blocks import block as block_module
-from kicad_blocks.config import InvalidConfigError, load_config
-from kicad_blocks.kicad_io import Footprint, KicadIoError, load_pcb
+from kicad_blocks.block import ApplyError, ApplyPlan, plan_apply
+from kicad_blocks.config import BlockSpec, Config, InvalidConfigError, load_config
+from kicad_blocks.kicad_io import Footprint, KicadIoError, apply_placements, load_pcb
 from kicad_blocks.reporter import (
+    format_apply_plan,
     format_config_errors,
     format_footprint_list,
     format_validate_ok,
@@ -112,6 +114,84 @@ def list_block(config_path: Path, sheet: str) -> None:
         all_footprints.extend(block_module.footprints_in_sheet(pcb, sheet))
 
     click.echo(format_footprint_list(all_footprints))
+
+
+@main.command()
+@_CONFIG_OPTION
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Print the planned placements without modifying the target PCB.",
+)
+def reuse(config_path: Path, dry_run: bool) -> None:
+    """Apply source-PCB layouts to the target PCB by anchor-relative placement.
+
+    For each ``[blocks.<name>]`` entry that declares both ``source`` and
+    ``anchor``, opens the source PCB, finds the target anchor by refdes,
+    transforms the source-block footprints into the target's frame, and
+    rewrites their positions. ``--dry-run`` prints the plan without writing.
+    """
+    try:
+        config = load_config(config_path)
+    except InvalidConfigError as exc:
+        click.echo(format_config_errors(exc.errors))
+        raise SystemExit(1) from None
+
+    if config.target is None:
+        click.echo("error: 'target' is not set in the config; reuse requires a target PCB")
+        raise SystemExit(1)
+
+    actionable = [b for b in config.blocks.values() if b.source and b.anchor]
+    if not actionable:
+        click.echo(
+            "error: no blocks have both 'source' and 'anchor' set; "
+            "reuse needs at least one such block to act on"
+        )
+        raise SystemExit(1)
+
+    target_path = _resolve(config, config.target)
+    plans: list[ApplyPlan] = []
+    for spec in actionable:
+        try:
+            plan = _plan_block(config, spec, target_path)
+        except (KicadIoError, ApplyError) as exc:
+            click.echo(f"error: {exc}")
+            raise SystemExit(1) from None
+        plans.append(plan)
+        click.echo(format_apply_plan(plan, dry_run=dry_run))
+
+    if dry_run:
+        return
+
+    all_placements = [p.placement for plan in plans for p in plan.placements]
+    if not all_placements:
+        return
+    try:
+        apply_placements(target_path, all_placements)
+    except KicadIoError as exc:
+        click.echo(f"error: {exc}")
+        raise SystemExit(1) from None
+
+
+def _plan_block(config: Config, spec: BlockSpec, target_path: Path) -> ApplyPlan:
+    """Open the source/target PCBs and return the apply plan for ``spec``."""
+    assert spec.source is not None  # filtered upstream
+    assert spec.anchor is not None
+    source_path = _resolve(config, spec.source)
+    source_pcb = load_pcb(source_path)
+    target_pcb = load_pcb(target_path)
+    return plan_apply(
+        source_pcb=source_pcb,
+        target_pcb=target_pcb,
+        sheet=str(spec.sheet),
+        anchor_ref=spec.anchor,
+    )
+
+
+def _resolve(config: Config, path: Path) -> Path:
+    """Resolve ``path`` against the config's project directory if relative."""
+    return path if path.is_absolute() else (config.project_dir / path)
 
 
 if __name__ == "__main__":
