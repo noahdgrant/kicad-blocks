@@ -15,6 +15,8 @@ Given KiCAD projects that share hierarchical schematic sheets (KiCAD 6+ instance
 - **scaffold** — generate a new KiCAD project skeleton wired up to a chosen set of shared sheets.
 - **panelize-config** — emit a [KiKit](https://github.com/yaqwsx/KiKit) JSON config to panelize a set of modular PCBs.
 
+After a successful `reuse`, the plugin writes a `<project>.kicad-blocks.lock.json` sidecar next to the config recording the source PCB hash, the applied block hash, the anchor refdes, and the plugin version. **Commit this file to git** — `sync` consults it to detect drift, and shipping it makes diffs reviewable across machines.
+
 ## Status
 
 - KiCAD 9 only (uses the modern instance-data schematic model)

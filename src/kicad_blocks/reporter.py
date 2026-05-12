@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from kicad_blocks.block import ApplyPlan
 from kicad_blocks.config import ConfigError
+from kicad_blocks.diff import BlockDiff
 from kicad_blocks.kicad_io import Footprint
 
 
@@ -162,4 +163,53 @@ def format_apply_plan(plan: ApplyPlan, *, dry_run: bool) -> str:
         )
         for net in plan.unresolved_nets:
             lines.append(f"    - {net}")
+    return "\n".join(lines)
+
+
+def format_block_diff(block_name: str, diff: BlockDiff) -> str:
+    """Render a :class:`BlockDiff` in a code-review style summary.
+
+    Groups changes by category — moved/added/removed footprints, added/removed
+    tracks, renamed nets — so the user can scan the report top-to-bottom and
+    review each kind of change separately, like a diff hunk.
+    """
+    lines: list[str] = [f"diff: block '{block_name}'"]
+    if diff.is_empty:
+        lines.append("  (no changes)")
+        return "\n".join(lines)
+
+    if diff.moved_footprints:
+        lines.append("  moved footprints:")
+        for m in diff.moved_footprints:
+            frm = f"({m.from_position[0]:.3f}, {m.from_position[1]:.3f}) {m.from_rotation:g}°"
+            to = f"({m.to_position[0]:.3f}, {m.to_position[1]:.3f}) {m.to_rotation:g}°"
+            lines.append(f"    {m.target_reference:<8} {frm} → {to}")
+    if diff.added_footprints:
+        lines.append("  added footprints (in source, no target counterpart):")
+        for a in diff.added_footprints:
+            lines.append(f"    {a.source_reference:<8} {a.symbol_uuid}")
+    if diff.removed_footprints:
+        lines.append("  removed footprints (in target, no longer in source):")
+        for r in diff.removed_footprints:
+            lines.append(f"    {r.target_reference:<8} {r.symbol_uuid}")
+    if diff.added_tracks:
+        lines.append("  added tracks:")
+        for t in diff.added_tracks:
+            lines.append(
+                f"    {t.net_name:<10} {t.layer:<6} "
+                f"({t.start[0]:.3f}, {t.start[1]:.3f}) → "
+                f"({t.end[0]:.3f}, {t.end[1]:.3f})"
+            )
+    if diff.removed_tracks:
+        lines.append("  removed tracks:")
+        for t in diff.removed_tracks:
+            lines.append(
+                f"    {t.net_name:<10} {t.layer:<6} "
+                f"({t.start[0]:.3f}, {t.start[1]:.3f}) → "
+                f"({t.end[0]:.3f}, {t.end[1]:.3f})"
+            )
+    if diff.renamed_nets:
+        lines.append("  renamed nets:")
+        for n in diff.renamed_nets:
+            lines.append(f"    {n.source_net} → {n.target_net}")
     return "\n".join(lines)
