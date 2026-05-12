@@ -25,9 +25,6 @@ jobs:
       - name: Lint (ruff check)
         run: uv run ruff check .
 
-      - name: Import order (ruff check --select I)
-        run: uv run ruff check --select I .
-
       - name: Format check (ruff format)
         run: uv run ruff format --check .
 
