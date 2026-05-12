@@ -14,13 +14,25 @@ import click
 from kicad_blocks import block as block_module
 from kicad_blocks.block import ApplyError, ApplyPlan, plan_apply
 from kicad_blocks.config import BlockSpec, Config, InvalidConfigError, load_config
+from kicad_blocks.diff import compute_diff
 from kicad_blocks.kicad_io import Footprint, KicadIoError, apply_placements, load_pcb
 from kicad_blocks.reporter import (
     format_apply_plan,
+    format_block_diff,
     format_config_errors,
     format_footprint_list,
     format_validate_ok,
     format_validate_problems,
+)
+from kicad_blocks.sync_state import (
+    BlockState,
+    LockFile,
+    LockFileError,
+    hash_applied_block,
+    hash_file,
+    lock_path_for,
+    read_lock,
+    write_lock,
 )
 
 _HELP = "Share schematic sheets across multiple KiCAD projects and reuse their PCB layouts."
@@ -193,6 +205,96 @@ def reuse(config_path: Path, dry_run: bool) -> None:
     except KicadIoError as exc:
         click.echo(f"error: {exc}")
         raise SystemExit(1) from None
+
+    _write_lock(config, plans)
+
+
+@main.command()
+@_CONFIG_OPTION
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Print the diff between the current source and target without writing.",
+)
+def sync(config_path: Path, dry_run: bool) -> None:
+    """Compare the current source layout against the target's block region.
+
+    Slice 7 implements ``--dry-run`` only. The command loads the lock file
+    written by the most recent ``reuse``, computes the structured diff between
+    the source block and the target's current state, and prints a
+    code-review-style report grouped by change type. The actual apply path
+    (with conflict detection and interactive confirmation) lands in slice 8.
+    """
+    if not dry_run:
+        click.echo("error: 'kicad-blocks sync' without --dry-run is not implemented yet (slice 8)")
+        raise SystemExit(2)
+
+    try:
+        config = load_config(config_path)
+    except InvalidConfigError as exc:
+        click.echo(format_config_errors(exc.errors))
+        raise SystemExit(1) from None
+
+    if config.target is None:
+        click.echo("error: 'target' is not set in the config; sync requires a target PCB")
+        raise SystemExit(1)
+
+    actionable = [b for b in config.blocks.values() if b.source and b.anchor]
+    if not actionable:
+        click.echo(
+            "error: no blocks have both 'source' and 'anchor' set; "
+            "sync needs at least one such block to act on"
+        )
+        raise SystemExit(1)
+
+    lock_path = lock_path_for(config.project_dir, config.project)
+    try:
+        read_lock(lock_path)
+    except LockFileError as exc:
+        click.echo(f"error: {exc}")
+        click.echo("hint: run 'kicad-blocks reuse' first to establish a baseline lock file")
+        raise SystemExit(1) from None
+
+    target_path = _resolve(config, config.target)
+    for spec in actionable:
+        assert spec.source is not None
+        assert spec.anchor is not None
+        source_path = _resolve(config, spec.source)
+        try:
+            source_pcb = load_pcb(source_path)
+            target_pcb = load_pcb(target_path)
+        except KicadIoError as exc:
+            click.echo(f"error: {exc}")
+            raise SystemExit(1) from None
+        diff = compute_diff(
+            source_pcb=source_pcb,
+            target_pcb=target_pcb,
+            sheet=str(spec.sheet),
+            anchor_ref=spec.anchor,
+            net_overrides=spec.net_map,
+        )
+        click.echo(format_block_diff(spec.name, diff))
+
+
+def _write_lock(config: Config, plans: list[tuple[BlockSpec, ApplyPlan]]) -> None:
+    """Persist the per-block apply record next to the config."""
+    plugin_ver = version("kicad-blocks")
+    blocks: dict[str, BlockState] = {}
+    for spec, plan in plans:
+        assert spec.source is not None
+        source_path = _resolve(config, spec.source)
+        blocks[spec.name] = BlockState(
+            source=str(spec.source),
+            source_pcb_hash=hash_file(source_path),
+            applied_block_hash=hash_applied_block(plan),
+            anchor_refdes=plan.target_anchor_ref,
+            sheet=str(spec.sheet),
+        )
+    write_lock(
+        lock_path_for(config.project_dir, config.project),
+        LockFile(plugin_version=plugin_ver, blocks=blocks),
+    )
 
 
 def _plan_block(config: Config, spec: BlockSpec, target_path: Path) -> ApplyPlan:
