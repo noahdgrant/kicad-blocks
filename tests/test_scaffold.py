@@ -22,11 +22,11 @@ def _make_sheet(path: Path, uuid: str) -> None:
     """Write a minimal valid ``.kicad_sch`` at ``path`` for the scaffold to reference."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        '(kicad_sch (version 20240108) (generator eeschema)\n'
+        "(kicad_sch (version 20240108) (generator eeschema)\n"
         f'  (uuid "{uuid}")\n'
         '  (paper "A4")\n'
-        '  (lib_symbols)\n'
-        ')\n'
+        "  (lib_symbols)\n"
+        ")\n"
     )
 
 

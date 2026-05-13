@@ -175,7 +175,7 @@ def _write_config(project_dir: Path, name: str, sheets: Sequence[Path]) -> None:
             [
                 f"[blocks.{block_name}]",
                 f'sheet = "{sheet.as_posix()}"',
-                "# source = \"../path/to/canonical-project.kicad_pcb\"",
+                '# source = "../path/to/canonical-project.kicad_pcb"',
                 f'# anchor = "U1"  # refdes of the anchor footprint in {name}.kicad_pcb',
                 "",
             ]
