@@ -17,6 +17,8 @@ Given KiCAD projects that share hierarchical schematic sheets (KiCAD 6+ instance
 
 After a successful `reuse`, the plugin writes a `<project>.kicad-blocks.lock.json` sidecar next to the config recording the source PCB hash, the applied block hash, the anchor refdes, and the plugin version. **Commit this file to git** — `sync` consults it to detect drift, and shipping it makes diffs reviewable across machines.
 
+Every subcommand also accepts `--format json` for machine-readable output. The JSON envelope is versioned (`schema_version: 1`) and shared by success and failure cases, so a consumer can parse a single stream and branch on the top-level `ok` field. Errors travel as structured entries under `errors[]` on stdout, and exit codes match the default text mode.
+
 ## Status
 
 - KiCAD 9 only (uses the modern instance-data schematic model)

@@ -2,6 +2,11 @@
 
 Each subcommand is a thin shell: load config → call into the domain core →
 hand the result to the reporter. Business logic stays out of this file.
+
+Every subcommand accepts ``--format {text,json}``; the default is ``text``.
+``--format json`` switches the entire output (success and failure cases) to a
+versioned JSON envelope on stdout — see :mod:`kicad_blocks.reporter` for the
+schema.
 """
 
 from __future__ import annotations
@@ -10,12 +15,13 @@ import json
 import math
 from importlib.metadata import version
 from pathlib import Path
+from typing import NoReturn
 
 import click
 
 from kicad_blocks import block as block_module
 from kicad_blocks.block import ApplyError, ApplyPlan, footprints_in_sheet, plan_apply
-from kicad_blocks.config import BlockSpec, Config, InvalidConfigError, load_config
+from kicad_blocks.config import BlockSpec, Config, ConfigError, InvalidConfigError, load_config
 from kicad_blocks.diff import compute_diff
 from kicad_blocks.kicad_io import Footprint, KicadIoError, Pcb, apply_placements, load_pcb
 from kicad_blocks.kikit_config import build_kikit_preset
@@ -26,6 +32,12 @@ from kicad_blocks.reporter import (
     format_footprint_list,
     format_validate_ok,
     format_validate_problems,
+    json_apply_plan,
+    json_block_diff,
+    json_config_errors,
+    json_envelope,
+    json_footprint,
+    json_runtime_errors,
 )
 from kicad_blocks.scaffold import ScaffoldError, scaffold_project
 from kicad_blocks.sync_state import (
@@ -52,6 +64,33 @@ _CONFIG_OPTION = click.option(
     show_default=True,
 )
 
+_FORMAT_OPTION = click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    show_default=True,
+    help="Output format. 'json' emits a single envelope; 'text' is human-readable.",
+)
+
+
+def _emit_config_errors(command: str, output_format: str, errors: list[ConfigError]) -> NoReturn:
+    """Emit a config-validation failure in the active format and exit non-zero."""
+    if output_format == "json":
+        click.echo(json_envelope(command, ok=False, errors=json_config_errors(errors)))
+    else:
+        click.echo(format_config_errors(errors))
+    raise SystemExit(1)
+
+
+def _emit_runtime_error(command: str, output_format: str, message: str) -> NoReturn:
+    """Emit a single-message runtime failure in the active format and exit non-zero."""
+    if output_format == "json":
+        click.echo(json_envelope(command, ok=False, errors=json_runtime_errors([message])))
+    else:
+        click.echo(f"error: {message}")
+    raise SystemExit(1)
+
 
 @click.group(help=_HELP)
 @click.version_option(version("kicad-blocks"), prog_name="kicad-blocks")
@@ -61,7 +100,8 @@ def main() -> None:
 
 @main.command()
 @_CONFIG_OPTION
-def validate(config_path: Path) -> None:
+@_FORMAT_OPTION
+def validate(config_path: Path, output_format: str) -> None:
     """Validate a kicad-blocks.toml and the files it references.
 
     Loads the config, opens every referenced PCB, and verifies every declared
@@ -71,8 +111,7 @@ def validate(config_path: Path) -> None:
     try:
         config = load_config(config_path)
     except InvalidConfigError as exc:
-        click.echo(format_config_errors(exc.errors), err=False)
-        raise SystemExit(1) from None
+        _emit_config_errors("validate", output_format, exc.errors)
 
     problems: list[str] = []
 
@@ -95,20 +134,27 @@ def validate(config_path: Path) -> None:
             )
 
     if problems:
-        click.echo(format_validate_problems(problems))
+        if output_format == "json":
+            click.echo(json_envelope("validate", ok=False, errors=json_runtime_errors(problems)))
+        else:
+            click.echo(format_validate_problems(problems))
         raise SystemExit(1)
 
-    click.echo(format_validate_ok(str(config_path)))
+    if output_format == "json":
+        click.echo(json_envelope("validate", ok=True, config=str(config_path)))
+    else:
+        click.echo(format_validate_ok(str(config_path)))
 
 
 @main.command("list-block")
 @_CONFIG_OPTION
+@_FORMAT_OPTION
 @click.option(
     "--sheet",
     required=True,
     help="Sheet path (as recorded in the footprint's Sheetfile property).",
 )
-def list_block(config_path: Path, sheet: str) -> None:
+def list_block(config_path: Path, output_format: str, sheet: str) -> None:
     """List footprints belonging to a given sheet across configured source PCBs.
 
     Loads the config, opens every referenced PCB, collects footprints whose
@@ -117,8 +163,7 @@ def list_block(config_path: Path, sheet: str) -> None:
     try:
         config = load_config(config_path)
     except InvalidConfigError as exc:
-        click.echo(format_config_errors(exc.errors))
-        raise SystemExit(1) from None
+        _emit_config_errors("list-block", output_format, exc.errors)
 
     all_footprints: list[Footprint] = []
     for source in config.sources:
@@ -126,22 +171,32 @@ def list_block(config_path: Path, sheet: str) -> None:
         try:
             pcb = load_pcb(pcb_path)
         except KicadIoError as exc:
-            click.echo(f"error: {exc}")
-            raise SystemExit(1) from None
+            _emit_runtime_error("list-block", output_format, str(exc))
         all_footprints.extend(block_module.footprints_in_sheet(pcb, sheet))
 
-    click.echo(format_footprint_list(all_footprints))
+    if output_format == "json":
+        click.echo(
+            json_envelope(
+                "list-block",
+                ok=True,
+                sheet=sheet,
+                footprints=[json_footprint(fp) for fp in all_footprints],
+            )
+        )
+    else:
+        click.echo(format_footprint_list(all_footprints))
 
 
 @main.command()
 @_CONFIG_OPTION
+@_FORMAT_OPTION
 @click.option(
     "--dry-run",
     is_flag=True,
     default=False,
     help="Print the planned placements without modifying the target PCB.",
 )
-def reuse(config_path: Path, dry_run: bool) -> None:
+def reuse(config_path: Path, output_format: str, dry_run: bool) -> None:
     """Apply source-PCB layouts to the target PCB by anchor-relative placement.
 
     For each ``[blocks.<name>]`` entry that declares both ``source`` and
@@ -152,43 +207,64 @@ def reuse(config_path: Path, dry_run: bool) -> None:
     try:
         config = load_config(config_path)
     except InvalidConfigError as exc:
-        click.echo(format_config_errors(exc.errors))
-        raise SystemExit(1) from None
+        _emit_config_errors("reuse", output_format, exc.errors)
 
     if config.target is None:
-        click.echo("error: 'target' is not set in the config; reuse requires a target PCB")
-        raise SystemExit(1)
+        _emit_runtime_error(
+            "reuse",
+            output_format,
+            "'target' is not set in the config; reuse requires a target PCB",
+        )
 
     actionable = [b for b in config.blocks.values() if b.source and b.anchor]
     if not actionable:
-        click.echo(
-            "error: no blocks have both 'source' and 'anchor' set; "
-            "reuse needs at least one such block to act on"
+        _emit_runtime_error(
+            "reuse",
+            output_format,
+            "no blocks have both 'source' and 'anchor' set; "
+            "reuse needs at least one such block to act on",
         )
-        raise SystemExit(1)
 
+    assert config.target is not None  # narrowed by the runtime error above
     target_path = _resolve(config, config.target)
     plans: list[tuple[BlockSpec, ApplyPlan]] = []
     for spec in actionable:
         try:
             plan = _plan_block(config, spec, target_path)
         except (KicadIoError, ApplyError) as exc:
-            click.echo(f"error: {exc}")
-            raise SystemExit(1) from None
+            _emit_runtime_error("reuse", output_format, str(exc))
         plans.append((spec, plan))
-        click.echo(format_apply_plan(plan, dry_run=dry_run))
+        if output_format == "text":
+            click.echo(format_apply_plan(plan, dry_run=dry_run))
 
     if dry_run:
+        if output_format == "json":
+            click.echo(
+                json_envelope(
+                    "reuse",
+                    ok=True,
+                    dry_run=True,
+                    blocks=[json_apply_plan(spec.name, plan) for spec, plan in plans],
+                )
+            )
         return
 
     blocked = [(spec, plan) for spec, plan in plans if plan.unresolved_nets]
     if blocked:
-        for spec, plan in blocked:
-            click.echo(
-                f"error: block '{spec.name}' has unresolved net(s) "
-                f"{list(plan.unresolved_nets)} — declare overrides in "
-                f"[blocks.{spec.name}.net_map] or rename in the target PCB"
-            )
+        if output_format == "json":
+            messages = [
+                f"block '{spec.name}' has unresolved net(s) {list(plan.unresolved_nets)} — "
+                f"declare overrides in [blocks.{spec.name}.net_map] or rename in the target PCB"
+                for spec, plan in blocked
+            ]
+            click.echo(json_envelope("reuse", ok=False, errors=json_runtime_errors(messages)))
+        else:
+            for spec, plan in blocked:
+                click.echo(
+                    f"error: block '{spec.name}' has unresolved net(s) "
+                    f"{list(plan.unresolved_nets)} — declare overrides in "
+                    f"[blocks.{spec.name}.net_map] or rename in the target PCB"
+                )
         raise SystemExit(1)
 
     all_placements = [p.placement for _, plan in plans for p in plan.placements]
@@ -196,26 +272,35 @@ def reuse(config_path: Path, dry_run: bool) -> None:
     all_vias = [v for _, plan in plans for v in plan.vias]
     all_zones = [z for _, plan in plans for z in plan.zones]
     all_graphics = [g for _, plan in plans for g in plan.graphics]
-    if not (all_placements or all_tracks or all_vias or all_zones or all_graphics):
-        return
-    try:
-        apply_placements(
-            target_path,
-            all_placements,
-            tracks=all_tracks,
-            vias=all_vias,
-            zones=all_zones,
-            graphics=all_graphics,
-        )
-    except KicadIoError as exc:
-        click.echo(f"error: {exc}")
-        raise SystemExit(1) from None
+    if all_placements or all_tracks or all_vias or all_zones or all_graphics:
+        try:
+            apply_placements(
+                target_path,
+                all_placements,
+                tracks=all_tracks,
+                vias=all_vias,
+                zones=all_zones,
+                graphics=all_graphics,
+            )
+        except KicadIoError as exc:
+            _emit_runtime_error("reuse", output_format, str(exc))
 
-    _write_lock(config, plans)
+        _write_lock(config, plans)
+
+    if output_format == "json":
+        click.echo(
+            json_envelope(
+                "reuse",
+                ok=True,
+                dry_run=False,
+                blocks=[json_apply_plan(spec.name, plan) for spec, plan in plans],
+            )
+        )
 
 
 @main.command()
 @_CONFIG_OPTION
+@_FORMAT_OPTION
 @click.option(
     "--dry-run",
     is_flag=True,
@@ -228,7 +313,7 @@ def reuse(config_path: Path, dry_run: bool) -> None:
     default=False,
     help="Skip the confirmation prompt and override hand-edit conflicts.",
 )
-def sync(config_path: Path, dry_run: bool, force: bool) -> None:
+def sync(config_path: Path, output_format: str, dry_run: bool, force: bool) -> None:
     """Bring the target's block region back in step with the source.
 
     Without ``--dry-run``: compute the structured diff for each block, refuse
@@ -242,29 +327,42 @@ def sync(config_path: Path, dry_run: bool, force: bool) -> None:
     try:
         config = load_config(config_path)
     except InvalidConfigError as exc:
-        click.echo(format_config_errors(exc.errors))
-        raise SystemExit(1) from None
+        _emit_config_errors("sync", output_format, exc.errors)
 
     if config.target is None:
-        click.echo("error: 'target' is not set in the config; sync requires a target PCB")
-        raise SystemExit(1)
+        _emit_runtime_error(
+            "sync", output_format, "'target' is not set in the config; sync requires a target PCB"
+        )
 
     actionable = [b for b in config.blocks.values() if b.source and b.anchor]
     if not actionable:
-        click.echo(
-            "error: no blocks have both 'source' and 'anchor' set; "
-            "sync needs at least one such block to act on"
+        _emit_runtime_error(
+            "sync",
+            output_format,
+            "no blocks have both 'source' and 'anchor' set; "
+            "sync needs at least one such block to act on",
         )
-        raise SystemExit(1)
 
     lock_path = lock_path_for(config.project_dir, config.project)
     try:
         lock = read_lock(lock_path)
     except LockFileError as exc:
-        click.echo(f"error: {exc}")
-        click.echo("hint: run 'kicad-blocks reuse' first to establish a baseline lock file")
+        message = f"{exc}\nhint: run 'kicad-blocks reuse' first to establish a baseline lock file"
+        if output_format == "json":
+            click.echo(
+                json_envelope(
+                    "sync",
+                    ok=False,
+                    errors=json_runtime_errors([str(exc)]),
+                    hint="run 'kicad-blocks reuse' first to establish a baseline lock file",
+                )
+            )
+        else:
+            click.echo(f"error: {exc}")
+            click.echo("hint: run 'kicad-blocks reuse' first to establish a baseline lock file")
         raise SystemExit(1) from None
 
+    assert config.target is not None
     target_path = _resolve(config, config.target)
     blocks: list[tuple[BlockSpec, ApplyPlan, Pcb]] = []
     diffs: list[tuple[BlockSpec, object]] = []
@@ -277,8 +375,7 @@ def sync(config_path: Path, dry_run: bool, force: bool) -> None:
             source_pcb = load_pcb(source_path)
             target_pcb = load_pcb(target_path)
         except KicadIoError as exc:
-            click.echo(f"error: {exc}")
-            raise SystemExit(1) from None
+            _emit_runtime_error("sync", output_format, str(exc))
 
         diff = compute_diff(
             source_pcb=source_pcb,
@@ -288,7 +385,8 @@ def sync(config_path: Path, dry_run: bool, force: bool) -> None:
             net_overrides=spec.net_map,
         )
         diffs.append((spec, diff))
-        click.echo(format_block_diff(spec.name, diff))
+        if output_format == "text":
+            click.echo(format_block_diff(spec.name, diff))
 
         if dry_run:
             continue
@@ -303,8 +401,7 @@ def sync(config_path: Path, dry_run: bool, force: bool) -> None:
                 allow_layer_mismatch=spec.allow_layer_mismatch,
             )
         except (KicadIoError, ApplyError) as exc:
-            click.echo(f"error: {exc}")
-            raise SystemExit(1) from None
+            _emit_runtime_error("sync", output_format, str(exc))
 
         prior_state = lock.blocks.get(spec.name)
         if prior_state is not None:
@@ -320,32 +417,77 @@ def sync(config_path: Path, dry_run: bool, force: bool) -> None:
         blocks.append((spec, plan, target_pcb))
 
     if dry_run:
+        if output_format == "json":
+            click.echo(
+                json_envelope(
+                    "sync",
+                    ok=True,
+                    dry_run=True,
+                    applied=False,
+                    blocks=[json_block_diff(spec.name, diff) for spec, diff in diffs],  # type: ignore[arg-type]
+                )
+            )
         return
 
     if conflicts and not force:
         names = ", ".join(f"'{name}'" for name in conflicts)
-        click.echo(
-            f"error: hand-edits detected in target block region(s): {names} — "
+        message = (
+            f"hand-edits detected in target block region(s): {names} — "
             f"re-run with --force to overwrite them with the source layout"
         )
+        if output_format == "json":
+            click.echo(
+                json_envelope(
+                    "sync",
+                    ok=False,
+                    errors=json_runtime_errors([message]),
+                    conflicts=list(conflicts),
+                )
+            )
+        else:
+            click.echo(f"error: {message}")
         raise SystemExit(1)
 
     if all(_diff_is_empty(d) for _, d in diffs):
-        click.echo("no changes to apply")
+        if output_format == "json":
+            click.echo(
+                json_envelope(
+                    "sync",
+                    ok=True,
+                    dry_run=False,
+                    applied=False,
+                    blocks=[json_block_diff(spec.name, diff) for spec, diff in diffs],  # type: ignore[arg-type]
+                )
+            )
+        else:
+            click.echo("no changes to apply")
         return
 
     if any(plan.unresolved_nets for _, plan, _ in blocks):
-        for spec, plan, _ in blocks:
-            if plan.unresolved_nets:
-                click.echo(
-                    f"error: block '{spec.name}' has unresolved net(s) "
-                    f"{list(plan.unresolved_nets)} — declare overrides in "
-                    f"[blocks.{spec.name}.net_map] or rename in the target PCB"
-                )
+        messages = [
+            f"block '{spec.name}' has unresolved net(s) {list(plan.unresolved_nets)} — "
+            f"declare overrides in [blocks.{spec.name}.net_map] or rename in the target PCB"
+            for spec, plan, _ in blocks
+            if plan.unresolved_nets
+        ]
+        if output_format == "json":
+            click.echo(json_envelope("sync", ok=False, errors=json_runtime_errors(messages)))
+        else:
+            for msg in messages:
+                click.echo(f"error: {msg}")
         raise SystemExit(1)
 
     if not force and not click.confirm("apply these changes to the target PCB?", default=False):
-        click.echo("aborted; target left untouched")
+        if output_format == "json":
+            click.echo(
+                json_envelope(
+                    "sync",
+                    ok=False,
+                    errors=json_runtime_errors(["aborted; target left untouched"]),
+                )
+            )
+        else:
+            click.echo("aborted; target left untouched")
         raise SystemExit(1)
 
     purge_pad_positions: list[tuple[float, float]] = []
@@ -370,14 +512,25 @@ def sync(config_path: Path, dry_run: bool, force: bool) -> None:
             purge_in_block_pad_positions=purge_pad_positions,
         )
     except KicadIoError as exc:
-        click.echo(f"error: {exc}")
-        raise SystemExit(1) from None
+        _emit_runtime_error("sync", output_format, str(exc))
 
     _write_lock(config, [(spec, plan) for spec, plan, _ in blocks])
-    click.echo("sync applied; lock updated")
+    if output_format == "json":
+        click.echo(
+            json_envelope(
+                "sync",
+                ok=True,
+                dry_run=False,
+                applied=True,
+                blocks=[json_block_diff(spec.name, diff) for spec, diff in diffs],  # type: ignore[arg-type]
+            )
+        )
+    else:
+        click.echo("sync applied; lock updated")
 
 
 @main.command()
+@_FORMAT_OPTION
 @click.option(
     "--name",
     required=True,
@@ -404,7 +557,13 @@ def sync(config_path: Path, dry_run: bool, force: bool) -> None:
     default=False,
     help="Write into the project directory even if it already exists.",
 )
-def scaffold(name: str, sheets: tuple[Path, ...], base_dir: Path, force: bool) -> None:
+def scaffold(
+    output_format: str,
+    name: str,
+    sheets: tuple[Path, ...],
+    base_dir: Path,
+    force: bool,
+) -> None:
     """Generate a new KiCAD project skeleton wired up to a set of shared sheets.
 
     Writes a ``.kicad_pro``, root ``.kicad_sch`` (with hierarchical sheet refs),
@@ -414,13 +573,16 @@ def scaffold(name: str, sheets: tuple[Path, ...], base_dir: Path, force: bool) -
     try:
         project_dir = scaffold_project(name, list(sheets), base_dir=base_dir, force=force)
     except ScaffoldError as exc:
-        click.echo(f"error: {exc}")
-        raise SystemExit(1) from None
-    click.echo(f"scaffolded project at {project_dir}")
+        _emit_runtime_error("scaffold", output_format, str(exc))
+    if output_format == "json":
+        click.echo(json_envelope("scaffold", ok=True, project_dir=str(project_dir)))
+    else:
+        click.echo(f"scaffolded project at {project_dir}")
 
 
 @main.command("panelize-config")
 @_CONFIG_OPTION
+@_FORMAT_OPTION
 @click.option(
     "--out",
     "out_path",
@@ -428,7 +590,7 @@ def scaffold(name: str, sheets: tuple[Path, ...], base_dir: Path, force: bool) -
     type=click.Path(dir_okay=False, path_type=Path),
     help="Path to write the KiKit preset JSON (default: panel.kikit.json next to the config).",
 )
-def panelize_config(config_path: Path, out_path: Path | None) -> None:
+def panelize_config(config_path: Path, output_format: str, out_path: Path | None) -> None:
     """Emit a KiKit ``panelize`` preset from the project config's ``[panelize]`` table.
 
     Reads ``kicad-blocks.toml``, translates the ``[panelize]`` declaration into
@@ -439,17 +601,23 @@ def panelize_config(config_path: Path, out_path: Path | None) -> None:
     try:
         config = load_config(config_path)
     except InvalidConfigError as exc:
-        click.echo(format_config_errors(exc.errors))
-        raise SystemExit(1) from None
+        _emit_config_errors("panelize-config", output_format, exc.errors)
 
     if config.panelize is None:
-        click.echo("error: no [panelize] table in config; declare one to use panelize-config")
-        raise SystemExit(1)
+        _emit_runtime_error(
+            "panelize-config",
+            output_format,
+            "no [panelize] table in config; declare one to use panelize-config",
+        )
 
+    assert config.panelize is not None
     preset = build_kikit_preset(config.panelize)
     destination = out_path if out_path is not None else config.project_dir / "panel.kikit.json"
     destination.write_text(json.dumps(preset, indent=2) + "\n")
-    click.echo(f"wrote KiKit preset to {destination}")
+    if output_format == "json":
+        click.echo(json_envelope("panelize-config", ok=True, output_path=str(destination)))
+    else:
+        click.echo(f"wrote KiKit preset to {destination}")
 
 
 def _write_lock(config: Config, plans: list[tuple[BlockSpec, ApplyPlan]]) -> None:
