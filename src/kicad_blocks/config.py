@@ -79,6 +79,41 @@ def _empty_blocks() -> dict[str, BlockSpec]:
     return {}
 
 
+SEPARATION_MOUSE_BITES = "mouse_bites"
+SEPARATION_TABS = "tabs"
+_VALID_SEPARATIONS = frozenset({SEPARATION_MOUSE_BITES, SEPARATION_TABS})
+
+OUTLINE_NONE = "none"
+OUTLINE_FRAME = "frame"
+OUTLINE_TIGHTFRAME = "tightframe"
+_VALID_OUTLINES = frozenset({OUTLINE_NONE, OUTLINE_FRAME, OUTLINE_TIGHTFRAME})
+
+_PANELIZE_KEYS = frozenset({"modules", "spacing", "separation", "outline", "fiducials"})
+
+
+@dataclass(frozen=True)
+class PanelizeSpec:
+    """Declaration of a panel of module PCBs for KiKit consumption.
+
+    Attributes:
+        modules: Paths to the module ``.kicad_pcb`` files to panelize. Relative
+            paths are resolved against the project directory.
+        spacing: Inter-board spacing as a KiKit length string (e.g. ``"2mm"``).
+        separation: Cut-line style between boards — either ``"mouse_bites"``
+            (perforated breakaway tabs) or ``"tabs"`` (V-cut tabs).
+        outline: Panel framing strategy — ``"frame"``, ``"tightframe"``, or
+            ``"none"`` (modules only, no surrounding rails).
+        fiducials: When ``True``, the emitted preset places a three-fiducial
+            set on the panel frame.
+    """
+
+    modules: tuple[Path, ...]
+    spacing: str = "2mm"
+    separation: str = SEPARATION_TABS
+    outline: str = OUTLINE_FRAME
+    fiducials: bool = False
+
+
 @dataclass(frozen=True)
 class Config:
     """A loaded ``kicad-blocks.toml``.
@@ -92,6 +127,8 @@ class Config:
         target: Optional path to this project's target PCB — the file ``reuse``
             writes to. Resolved relative to ``project_dir``.
         blocks: Per-block declarations.
+        panelize: Optional ``[panelize]`` declaration consumed by
+            ``panelize-config``. Absent when the project does not panelize.
     """
 
     config_path: Path
@@ -100,6 +137,7 @@ class Config:
     sources: tuple[Path, ...]
     target: Path | None = None
     blocks: dict[str, BlockSpec] = field(default_factory=_empty_blocks)
+    panelize: PanelizeSpec | None = None
 
 
 def load_config(path: Path) -> Config:
@@ -315,6 +353,11 @@ def _validate(path: Path, raw: str, data: dict[str, Any]) -> Config:
                 allow_layer_mismatch=allow_layer_mismatch,
             )
 
+    panelize: PanelizeSpec | None = None
+    panelize_raw: object = data.get("panelize")
+    if panelize_raw is not None:
+        panelize = _validate_panelize(path, raw, panelize_raw, errors)
+
     if errors:
         raise InvalidConfigError(errors)
 
@@ -325,6 +368,143 @@ def _validate(path: Path, raw: str, data: dict[str, Any]) -> Config:
         sources=sources,
         target=target,
         blocks=blocks,
+        panelize=panelize,
+    )
+
+
+def _validate_panelize(
+    path: Path, raw: str, data: object, errors: list[ConfigError]
+) -> PanelizeSpec | None:
+    """Validate the optional ``[panelize]`` table and produce a :class:`PanelizeSpec`.
+
+    Appends any problems to ``errors`` and returns ``None`` on hard failure so
+    the rest of the config can still surface its own errors in one shot.
+    """
+    if not isinstance(data, dict):
+        errors.append(
+            ConfigError(
+                path=path,
+                message="'panelize' must be a table",
+                line=_find_section_line(raw, "panelize"),
+                key_path="panelize",
+            )
+        )
+        return None
+    panelize_dict = cast(dict[str, object], data)
+
+    unknown = sorted(set(panelize_dict) - _PANELIZE_KEYS)
+    if unknown:
+        errors.append(
+            ConfigError(
+                path=path,
+                message=f"unknown panelize option(s): {unknown}",
+                line=_find_section_line(raw, "panelize"),
+                key_path="panelize",
+            )
+        )
+        return None
+
+    modules_raw: object = panelize_dict.get("modules")
+    if not isinstance(modules_raw, list):
+        errors.append(
+            ConfigError(
+                path=path,
+                message="'panelize.modules' is required and must be a list of PCB paths",
+                line=_find_section_line(raw, "panelize"),
+                key_path="panelize.modules",
+            )
+        )
+        return None
+    modules_list = cast(list[object], modules_raw)
+    bad_indices = [i for i, item in enumerate(modules_list) if not isinstance(item, str)]
+    if bad_indices:
+        errors.append(
+            ConfigError(
+                path=path,
+                message=f"'panelize.modules' entries must be strings (bad indices: {bad_indices})",
+                line=_find_section_line(raw, "panelize"),
+                key_path="panelize.modules",
+            )
+        )
+        return None
+    if not modules_list:
+        errors.append(
+            ConfigError(
+                path=path,
+                message="'panelize.modules' must list at least one PCB path",
+                line=_find_section_line(raw, "panelize"),
+                key_path="panelize.modules",
+            )
+        )
+        return None
+    modules = tuple(Path(s) for s in modules_list if isinstance(s, str))
+
+    spacing = "2mm"
+    spacing_raw: object = panelize_dict.get("spacing")
+    if spacing_raw is not None:
+        if not isinstance(spacing_raw, str):
+            errors.append(
+                ConfigError(
+                    path=path,
+                    message="'panelize.spacing' must be a string (e.g. '2mm')",
+                    line=_find_section_line(raw, "panelize"),
+                    key_path="panelize.spacing",
+                )
+            )
+            return None
+        spacing = spacing_raw
+
+    separation = SEPARATION_TABS
+    separation_raw: object = panelize_dict.get("separation")
+    if separation_raw is not None:
+        if not isinstance(separation_raw, str) or separation_raw not in _VALID_SEPARATIONS:
+            errors.append(
+                ConfigError(
+                    path=path,
+                    message=(f"'panelize.separation' must be one of {sorted(_VALID_SEPARATIONS)}"),
+                    line=_find_section_line(raw, "panelize"),
+                    key_path="panelize.separation",
+                )
+            )
+            return None
+        separation = separation_raw
+
+    outline = OUTLINE_FRAME
+    outline_raw: object = panelize_dict.get("outline")
+    if outline_raw is not None:
+        if not isinstance(outline_raw, str) or outline_raw not in _VALID_OUTLINES:
+            errors.append(
+                ConfigError(
+                    path=path,
+                    message=f"'panelize.outline' must be one of {sorted(_VALID_OUTLINES)}",
+                    line=_find_section_line(raw, "panelize"),
+                    key_path="panelize.outline",
+                )
+            )
+            return None
+        outline = outline_raw
+
+    fiducials = False
+    fiducials_raw: object = panelize_dict.get("fiducials")
+    if fiducials_raw is not None:
+        if not isinstance(fiducials_raw, bool):
+            errors.append(
+                ConfigError(
+                    path=path,
+                    message="'panelize.fiducials' must be a boolean",
+                    line=_find_section_line(raw, "panelize"),
+                    key_path="panelize.fiducials",
+                )
+            )
+            return None
+        fiducials = fiducials_raw
+
+    return PanelizeSpec(
+        modules=modules,
+        spacing=spacing,
+        separation=separation,
+        outline=outline,
+        fiducials=fiducials,
     )
 
 
