@@ -1,6 +1,6 @@
 [project]
 name = "kicad-blocks"
-version = "0.0.0"
+version = "0.1.0"
 description = "Share schematic sheets across multiple KiCAD projects and reuse their PCB layouts."
 readme = "README.md"
 license = { file = "LICENSE" }
