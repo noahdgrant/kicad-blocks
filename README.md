@@ -27,11 +27,60 @@ Every subcommand also accepts `--format json` for machine-readable output. The J
 
 ## Install
 
-Not yet published. Once v0.1 ships:
-
 ```sh
 pipx install kicad-blocks
 ```
+
+## Quick start: reuse and sync
+
+Assume you have two KiCAD projects sharing a hierarchical sheet `sheets/mcu.kicad_sch`: a fully-routed `mcu-module/` project that owns the canonical layout, and a `dev-board/` project that wants the same MCU section dropped in.
+
+1. **Scaffold the target project** (skip if you already have one):
+
+   ```sh
+   kicad-blocks scaffold --name dev-board --sheets ../sheets/mcu.kicad_sch
+   ```
+
+2. **Place the anchor footprint** in `dev-board/dev-board.kicad_pcb` — typically the MCU itself (e.g. `U1`) — at the position and rotation where you want the block to land. Save the board.
+
+3. **Write `dev-board/kicad-blocks.toml`**:
+
+   ```toml
+   [[blocks]]
+   source   = "../mcu-module/mcu-module.kicad_pcb"
+   sheet    = "sheets/mcu.kicad_sch"
+   anchor   = "U1"
+   ```
+
+4. **Validate the config** before touching the board:
+
+   ```sh
+   kicad-blocks validate
+   ```
+
+5. **Preview** the planned placement, then apply:
+
+   ```sh
+   kicad-blocks reuse --dry-run    # prints the items that would be placed
+   kicad-blocks reuse               # writes dev-board.kicad_pcb atomically
+   ```
+
+   A `dev-board.kicad-blocks.lock.json` sidecar appears next to your config — commit it.
+
+6. **Later, when the source layout changes**, re-sync:
+
+   ```sh
+   kicad-blocks sync --dry-run     # diff: added / removed / moved / net-rewired
+   kicad-blocks sync                # prompts before overwriting
+   ```
+
+   If `dev-board.kicad_pcb` was hand-edited *inside* the block region since the last apply, `sync` refuses and tells you to pass `--force` once you've reconciled the changes.
+
+For a panel of modular PCBs, declare the `[panelize]` section of `kicad-blocks.toml` and emit a KiKit config with `kicad-blocks panelize-config --out panel.json`, then run KiKit yourself.
+
+## Reporting issues
+
+Bug reports and feature requests welcome at the [issue tracker](https://github.com/noahdgrant/kicad-blocks/issues). Please include the KiCAD version, the `kicad-blocks` version, and a minimal reproducer where possible.
 
 ## Contributing
 
