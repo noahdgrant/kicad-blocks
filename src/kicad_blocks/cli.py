@@ -25,6 +25,7 @@ from kicad_blocks.reporter import (
     format_validate_ok,
     format_validate_problems,
 )
+from kicad_blocks.scaffold import ScaffoldError, scaffold_project
 from kicad_blocks.sync_state import (
     BlockState,
     LockFile,
@@ -372,6 +373,48 @@ def sync(config_path: Path, dry_run: bool, force: bool) -> None:
 
     _write_lock(config, [(spec, plan) for spec, plan, _ in blocks])
     click.echo("sync applied; lock updated")
+
+
+@main.command()
+@click.option(
+    "--name",
+    required=True,
+    help="Project name. Used for the generated file stems and the config 'project' key.",
+)
+@click.option(
+    "--sheet",
+    "sheets",
+    multiple=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Path to a shared .kicad_sch to wire up. Pass --sheet repeatedly to include several.",
+)
+@click.option(
+    "--dir",
+    "base_dir",
+    default=".",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Directory to create the new project directory inside (default: current directory).",
+    show_default=True,
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Write into the project directory even if it already exists.",
+)
+def scaffold(name: str, sheets: tuple[Path, ...], base_dir: Path, force: bool) -> None:
+    """Generate a new KiCAD project skeleton wired up to a set of shared sheets.
+
+    Writes a ``.kicad_pro``, root ``.kicad_sch`` (with hierarchical sheet refs),
+    empty ``.kicad_pcb`` with a placeholder ``Edge.Cuts`` outline, and a starter
+    ``kicad-blocks.toml`` under ``<dir>/<name>/``.
+    """
+    try:
+        project_dir = scaffold_project(name, list(sheets), base_dir=base_dir, force=force)
+    except ScaffoldError as exc:
+        click.echo(f"error: {exc}")
+        raise SystemExit(1) from None
+    click.echo(f"scaffolded project at {project_dir}")
 
 
 def _write_lock(config: Config, plans: list[tuple[BlockSpec, ApplyPlan]]) -> None:
