@@ -4,7 +4,15 @@ from pathlib import Path
 
 import pytest
 
-from kicad_blocks.config import ConfigError, InvalidConfigError, load_config
+from kicad_blocks.config import (
+    OUTLINE_FRAME,
+    OUTLINE_TIGHTFRAME,
+    SEPARATION_MOUSE_BITES,
+    SEPARATION_TABS,
+    ConfigError,
+    InvalidConfigError,
+    load_config,
+)
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "minimal"
 
@@ -222,3 +230,131 @@ def test_block_net_map_non_string_values_report_error(tmp_path: Path) -> None:
     with pytest.raises(InvalidConfigError) as excinfo:
         load_config(bad)
     assert any("net_map" in err.message for err in excinfo.value.errors)
+
+
+def test_panelize_absent_by_default(tmp_path: Path) -> None:
+    """A config without a ``[panelize]`` table loads with ``panelize=None``."""
+    config_path = tmp_path / "kicad-blocks.toml"
+    config_path.write_text('project = "x"\nsources = ["a.kicad_pcb"]\n')
+    config = load_config(config_path)
+    assert config.panelize is None
+
+
+def test_panelize_minimal_uses_defaults(tmp_path: Path) -> None:
+    """``[panelize]`` with only ``modules`` fills in the default spacing/outline."""
+    config_path = tmp_path / "kicad-blocks.toml"
+    config_path.write_text(
+        'project = "x"\n'
+        'sources = ["a.kicad_pcb"]\n'
+        "\n[panelize]\n"
+        'modules = ["../mcu/mcu.kicad_pcb", "../power/power.kicad_pcb"]\n'
+    )
+    config = load_config(config_path)
+    assert config.panelize is not None
+    assert config.panelize.modules == (
+        Path("../mcu/mcu.kicad_pcb"),
+        Path("../power/power.kicad_pcb"),
+    )
+    assert config.panelize.spacing == "2mm"
+    assert config.panelize.separation == SEPARATION_TABS
+    assert config.panelize.outline == OUTLINE_FRAME
+    assert config.panelize.fiducials is False
+
+
+def test_panelize_full_round_trip(tmp_path: Path) -> None:
+    """Every panelize field round-trips when explicitly declared."""
+    config_path = tmp_path / "kicad-blocks.toml"
+    config_path.write_text(
+        'project = "x"\n'
+        'sources = ["a.kicad_pcb"]\n'
+        "\n[panelize]\n"
+        'modules = ["../mcu/mcu.kicad_pcb"]\n'
+        'spacing = "3mm"\n'
+        'separation = "mouse_bites"\n'
+        'outline = "tightframe"\n'
+        "fiducials = true\n"
+    )
+    config = load_config(config_path)
+    assert config.panelize is not None
+    assert config.panelize.spacing == "3mm"
+    assert config.panelize.separation == SEPARATION_MOUSE_BITES
+    assert config.panelize.outline == OUTLINE_TIGHTFRAME
+    assert config.panelize.fiducials is True
+
+
+def test_panelize_missing_modules_reports_error(tmp_path: Path) -> None:
+    """``[panelize]`` without ``modules`` raises a structured error."""
+    bad = tmp_path / "kicad-blocks.toml"
+    bad.write_text('project = "x"\nsources = ["a.kicad_pcb"]\n\n[panelize]\nspacing = "2mm"\n')
+    with pytest.raises(InvalidConfigError) as excinfo:
+        load_config(bad)
+    assert any("panelize.modules" in (err.key_path or "") for err in excinfo.value.errors)
+
+
+def test_panelize_empty_modules_reports_error(tmp_path: Path) -> None:
+    """An empty ``modules`` list raises a structured error."""
+    bad = tmp_path / "kicad-blocks.toml"
+    bad.write_text('project = "x"\nsources = ["a.kicad_pcb"]\n\n[panelize]\nmodules = []\n')
+    with pytest.raises(InvalidConfigError) as excinfo:
+        load_config(bad)
+    assert any("at least one" in err.message for err in excinfo.value.errors)
+
+
+def test_panelize_unknown_option_reports_error(tmp_path: Path) -> None:
+    """Unrecognized panelize keys are a hard error so typos don't silently no-op."""
+    bad = tmp_path / "kicad-blocks.toml"
+    bad.write_text(
+        'project = "x"\n'
+        'sources = ["a.kicad_pcb"]\n'
+        "\n[panelize]\n"
+        'modules = ["a.kicad_pcb"]\n'
+        'mystery = "what is this"\n'
+    )
+    with pytest.raises(InvalidConfigError) as excinfo:
+        load_config(bad)
+    assert any("mystery" in err.message for err in excinfo.value.errors)
+
+
+def test_panelize_bad_separation_reports_error(tmp_path: Path) -> None:
+    """``separation`` must be one of the documented options."""
+    bad = tmp_path / "kicad-blocks.toml"
+    bad.write_text(
+        'project = "x"\n'
+        'sources = ["a.kicad_pcb"]\n'
+        "\n[panelize]\n"
+        'modules = ["a.kicad_pcb"]\n'
+        'separation = "scoring"\n'
+    )
+    with pytest.raises(InvalidConfigError) as excinfo:
+        load_config(bad)
+    assert any("separation" in err.message for err in excinfo.value.errors)
+
+
+def test_panelize_bad_outline_reports_error(tmp_path: Path) -> None:
+    """``outline`` must be one of the documented options."""
+    bad = tmp_path / "kicad-blocks.toml"
+    bad.write_text(
+        'project = "x"\n'
+        'sources = ["a.kicad_pcb"]\n'
+        "\n[panelize]\n"
+        'modules = ["a.kicad_pcb"]\n'
+        'outline = "donut"\n'
+    )
+    with pytest.raises(InvalidConfigError) as excinfo:
+        load_config(bad)
+    assert any("outline" in err.message for err in excinfo.value.errors)
+
+
+def test_panelize_fiducials_wrong_type_reports_error(tmp_path: Path) -> None:
+    """``fiducials`` must be a boolean."""
+    bad = tmp_path / "kicad-blocks.toml"
+    bad.write_text(
+        'project = "x"\n'
+        'sources = ["a.kicad_pcb"]\n'
+        "\n[panelize]\n"
+        'modules = ["a.kicad_pcb"]\n'
+        'fiducials = "yes"\n'
+    )
+    with pytest.raises(InvalidConfigError) as excinfo:
+        load_config(bad)
+    assert any("fiducials" in err.message for err in excinfo.value.errors)

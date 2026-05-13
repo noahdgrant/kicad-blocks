@@ -6,6 +6,7 @@ hand the result to the reporter. Business logic stays out of this file.
 
 from __future__ import annotations
 
+import json
 import math
 from importlib.metadata import version
 from pathlib import Path
@@ -17,6 +18,7 @@ from kicad_blocks.block import ApplyError, ApplyPlan, footprints_in_sheet, plan_
 from kicad_blocks.config import BlockSpec, Config, InvalidConfigError, load_config
 from kicad_blocks.diff import compute_diff
 from kicad_blocks.kicad_io import Footprint, KicadIoError, Pcb, apply_placements, load_pcb
+from kicad_blocks.kikit_config import build_kikit_preset
 from kicad_blocks.reporter import (
     format_apply_plan,
     format_block_diff,
@@ -415,6 +417,39 @@ def scaffold(name: str, sheets: tuple[Path, ...], base_dir: Path, force: bool) -
         click.echo(f"error: {exc}")
         raise SystemExit(1) from None
     click.echo(f"scaffolded project at {project_dir}")
+
+
+@main.command("panelize-config")
+@_CONFIG_OPTION
+@click.option(
+    "--out",
+    "out_path",
+    default=None,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Path to write the KiKit preset JSON (default: panel.kikit.json next to the config).",
+)
+def panelize_config(config_path: Path, out_path: Path | None) -> None:
+    """Emit a KiKit ``panelize`` preset from the project config's ``[panelize]`` table.
+
+    Reads ``kicad-blocks.toml``, translates the ``[panelize]`` declaration into
+    a KiKit-compatible JSON preset, and writes it to ``--out`` (or
+    ``panel.kikit.json`` next to the config). The user runs KiKit themselves —
+    we never invoke a subprocess.
+    """
+    try:
+        config = load_config(config_path)
+    except InvalidConfigError as exc:
+        click.echo(format_config_errors(exc.errors))
+        raise SystemExit(1) from None
+
+    if config.panelize is None:
+        click.echo("error: no [panelize] table in config; declare one to use panelize-config")
+        raise SystemExit(1)
+
+    preset = build_kikit_preset(config.panelize)
+    destination = out_path if out_path is not None else config.project_dir / "panel.kikit.json"
+    destination.write_text(json.dumps(preset, indent=2) + "\n")
+    click.echo(f"wrote KiKit preset to {destination}")
 
 
 def _write_lock(config: Config, plans: list[tuple[BlockSpec, ApplyPlan]]) -> None:
