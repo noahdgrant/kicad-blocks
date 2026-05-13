@@ -1,9 +1,10 @@
 """Read and write the ``<project>.kicad-blocks.lock.json`` sidecar.
 
 The lock file records, per declared block, what was applied to the target PCB
-on the most recent ``reuse`` (or, post-slice-8, ``sync``). Slice 7 only writes
-the file — slice 8 will use ``applied_block_hash`` to detect hand-edits to the
-target's block region.
+on the most recent ``reuse`` or ``sync``. ``applied_block_hash`` is the canonical
+fingerprint slice 8's apply path compares against the target's *current* block
+region to detect hand-edits: a mismatch means someone has touched the block in
+the target since the last apply, so we refuse to overwrite without ``--force``.
 
 The file is committed to git so diff history is reviewable and reproducible
 across machines. The schema is versioned (``schema_version: 1``) so future
@@ -14,11 +15,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from kicad_blocks.block import ApplyPlan
+from kicad_blocks.block import ApplyPlan, footprints_in_sheet
+from kicad_blocks.kicad_io import Pcb
 
 SCHEMA_VERSION = 1
 
@@ -171,6 +174,121 @@ def _require_str(data: dict[str, object], key: str, path: Path, block_name: str)
 def hash_file(path: Path) -> str:
     """Return ``sha256:<hex>`` of the bytes at ``path``."""
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+_PAD_TOLERANCE_MM = 1e-3
+
+
+def hash_target_block_state(
+    target_pcb: Pcb,
+    sheet: str,
+    anchor_ref: str,
+    transform_angle_deg: float,
+) -> str:
+    """Return the canonical hash of the target's *current* block region.
+
+    Mirrors :func:`hash_applied_block` shape so a value produced from the target
+    PCB's current state can be compared byte-for-byte against the lock's
+    ``applied_block_hash`` field. Mismatch → the user has hand-edited the block
+    region since the last apply.
+
+    ``transform_angle_deg`` is part of the canonical payload (it's recorded in
+    the per-apply hash even though the placements are already in the target
+    frame); pass the value of the freshly-computed plan's
+    ``transform_angle_deg`` so an unmoved anchor reproduces the same hash.
+    """
+    block_fps = footprints_in_sheet(target_pcb, sheet)
+    anchor = next((fp for fp in block_fps if fp.reference == anchor_ref), None)
+    anchor_sym = anchor.symbol_uuid if anchor else None
+    fp_tuples: list[tuple[str, float, float, float, str]] = sorted(
+        (
+            fp.symbol_uuid,
+            round(fp.position[0], 6),
+            round(fp.position[1], 6),
+            round(fp.rotation, 6),
+            fp.layer,
+        )
+        for fp in block_fps
+        if fp.symbol_uuid is not None and fp.symbol_uuid != anchor_sym
+    )
+    pad_positions = _absolute_pad_positions(list(block_fps))
+    tracks: list[tuple[str, str, float, float, float, float, float]] = []
+    for track in target_pcb.tracks:
+        if _near_any(track.start, pad_positions) and _near_any(track.end, pad_positions):
+            tracks.append(
+                (
+                    track.layer,
+                    track.net,
+                    round(track.start[0], 6),
+                    round(track.start[1], 6),
+                    round(track.end[0], 6),
+                    round(track.end[1], 6),
+                    round(track.width, 6),
+                )
+            )
+    tracks.sort()
+    vias: list[tuple[str, float, float, float, float, tuple[str, ...]]] = []
+    for via in target_pcb.vias:
+        if _near_any(via.position, pad_positions):
+            vias.append(
+                (
+                    via.net,
+                    round(via.position[0], 6),
+                    round(via.position[1], 6),
+                    round(via.size, 6),
+                    round(via.drill, 6),
+                    tuple(via.layers),
+                )
+            )
+    vias.sort()
+    payload: dict[str, Any] = {
+        "anchor": anchor_ref,
+        "sheet": sheet,
+        "transform_angle_deg": round(transform_angle_deg, 6),
+        "footprints": fp_tuples,
+        "tracks": tracks,
+        "vias": vias,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _absolute_pad_positions(
+    footprints: list[Any],
+) -> list[tuple[float, float]]:
+    """Return every pad's absolute world position across ``footprints``."""
+    positions: list[tuple[float, float]] = []
+    for fp in footprints:
+        cos_r, sin_r = _cos_sin(fp.rotation)
+        fx, fy = fp.position
+        for pad in fp.pads:
+            px, py = pad.position
+            positions.append((fx + cos_r * px - sin_r * py, fy + sin_r * px + cos_r * py))
+    return positions
+
+
+def _cos_sin(angle_deg: float) -> tuple[float, float]:
+    """Return ``(cos, sin)`` for ``angle_deg`` with axis-aligned angles exact."""
+    a = angle_deg % 360.0
+    if a == 0.0:
+        return (1.0, 0.0)
+    if a == 90.0:
+        return (0.0, 1.0)
+    if a == 180.0:
+        return (-1.0, 0.0)
+    if a == 270.0:
+        return (0.0, -1.0)
+    theta = math.radians(a)
+    return (math.cos(theta), math.sin(theta))
+
+
+def _near_any(point: tuple[float, float], candidates: list[tuple[float, float]]) -> bool:
+    """Return ``True`` if ``point`` is within :data:`_PAD_TOLERANCE_MM` of any candidate."""
+    px, py = point
+    for cx, cy in candidates:
+        if abs(px - cx) <= _PAD_TOLERANCE_MM and abs(py - cy) <= _PAD_TOLERANCE_MM:
+            return True
+    return False
 
 
 def hash_applied_block(plan: ApplyPlan) -> str:
